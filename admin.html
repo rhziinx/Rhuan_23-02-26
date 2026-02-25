@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel Administrativo - Cantina Digital</title>
+    <link rel="stylesheet" href="admin-styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="admin-app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <span class="brand-icon">🍔</span>
+                <div>
+                    <h1>Cantina Digital</h1>
+                    <span>Painel Admin</span>
+                </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-section="dashboard">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+                        <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+                    </svg>
+                    Dashboard
+                </a>
+                <a href="#" class="nav-item" data-section="pedidos">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 2L6 7H3L5.5 20H18.5L21 7H18L15 2H9Z"/>
+                    </svg>
+                    Pedidos
+                    <span class="badge" id="pedidosBadge">0</span>
+                </a>
+                <a href="#" class="nav-item" data-section="produtos">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    </svg>
+                    Produtos
+                </a>
+                <a href="#" class="nav-item" data-section="relatorios">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 20V10M12 20V4M6 20v-6"/>
+                    </svg>
+                    Relatórios
+                </a>
+                <a href="#" class="nav-item" data-section="config">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                    Configurações
+                </a>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <span id="userName">Admin</span>
+                    <small>Administrador</small>
+                </div>
+                <button class="btn-logout" onclick="admin.logout()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+                    </svg>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard Section -->
+            <section id="dashboardSection" class="content-section active">
+                <header class="section-header">
+                    <div>
+                        <h2>Dashboard</h2>
+                        <p>Visão geral do negócio</p>
+                    </div>
+                    <div class="header-actions">
+                        <button class="btn-secondary" onclick="admin.refreshData()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                            </svg>
+                            Atualizar
+                        </button>
+                    </div>
+                </header>
+
+                <div class="stats-grid">
+                    <div class="stat-card primary">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-info">
+                            <span class="stat-label">Vendas Hoje</span>
+                            <strong class="stat-value" id="vendasHoje">R$ 0,00</strong>
+                            <span class="stat-change positive">+12% vs ontem</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card success">
+                        <div class="stat-icon">📦</div>
+                        <div class="stat-info">
+                            <span class="stat-label">Pedidos Hoje</span>
+                            <strong class="stat-value" id="pedidosHoje">0</strong>
+                            <span class="stat-change positive">+5% vs ontem</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card warning">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-info">
+                            <span class="stat-label">Ticket Médio</span>
+                            <strong class="stat-value" id="ticketMedio">R$ 0,00</strong>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card danger">
+                        <div class="stat-icon">⚠️</div>
+                        <div class="stat-info">
+                            <span class="stat-label">Estoque Baixo</span>
+                            <strong class="stat-value" id="estoqueBaixo">0</strong>
+                            <span class="stat-change">produtos</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="card chart-card">
+                        <h3>Vendas dos Últimos 7 Dias</h3>
+                        <canvas id="vendasChart"></canvas>
+                    </div>
+                    
+                    <div class="card pedidos-card">
+                        <h3>Pedidos Recentes</h3>
+                        <div class="pedidos-list" id="pedidosRecentes">
+                            <div class="loading">Carregando...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Pedidos Section -->
+            <section id="pedidosSection" class="content-section">
+                <header class="section-header">
+                    <div>
+                        <h2>Gerenciar Pedidos</h2>
+                        <p>Acompanhe e atualize os pedidos</p>
+                    </div>
+                    <div class="header-actions">
+                        <div class="status-tabs">
+                            <button class="tab-btn active" onclick="admin.filtrarPedidos('pago')">Novos</button>
+                            <button class="tab-btn" onclick="admin.filtrarPedidos('preparando')">Cozinha</button>
+                            <button class="tab-btn" onclick="admin.filtrarPedidos('pronto')">Entrega</button>
+                            <button class="tab-btn" onclick="admin.filtrarPedidos('entregue,cancelado')">Histórico</button>
+                        </div>
+                    </div>
+                </header>
+
+                <div class="pedidos-grid" id="pedidosGrid">
+                    <div class="loading">Carregando pedidos...</div>
+                </div>
+            </section>
+
+            <!-- Produtos Section -->
+            <section id="produtosSection" class="content-section">
+                <header class="section-header">
+                    <div>
+                        <h2>Gerenciar Produtos</h2>
+                        <p>Cadastre e edite produtos</p>
+                    </div>
+                    <button class="btn-primary" onclick="admin.openProductModal()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                        Novo Produto
+                    </button>
+                </header>
+
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Imagem</th>
+                                <th>Nome</th>
+                                <th>Categoria</th>
+                                <th>Preço</th>
+                                <th>Estoque</th>
+                                <th>Status</th>
+                                <th>Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody id="produtosTable">
+                            <tr><td colspan="7" class="loading">Carregando...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Relatórios Section -->
+            <section id="relatoriosSection" class="content-section">
+                <header class="section-header">
+                    <h2>Relatórios</h2>
+                </header>
+                
+                <div class="card">
+                    <div class="form-row">
+                        <div class="input-group">
+                            <label>Data Início</label>
+                            <input type="date" id="relDataInicio">
+                        </div>
+                        <div class="input-group">
+                            <label>Data Fim</label>
+                            <input type="date" id="relDataFim">
+                        </div>
+                        <button class="btn-primary" onclick="admin.gerarRelatorio()" style="align-self: flex-end;">
+                            Gerar Relatório
+                        </button>
+                    </div>
+                    
+                    <div id="relatorioResultado" style="margin-top: 2rem;"></div>
+                </div>
+            </section>
+
+            <!-- Configurações Section -->
+            <section id="configSection" class="content-section">
+                <header class="section-header">
+                    <h2>Configurações</h2>
+                </header>
+                
+                <div class="card" style="max-width: 600px;">
+                    <form id="configForm" onsubmit="admin.salvarConfig(event)">
+                        <div class="input-group">
+                            <label>Nome da Empresa</label>
+                            <input type="text" id="configNome" required>
+                        </div>
+                        <div class="input-group">
+                            <label>Telefone</label>
+                            <input type="text" id="configTelefone">
+                        </div>
+                        <div class="input-group">
+                            <label>Chave PIX</label>
+                            <input type="text" id="configPix">
+                        </div>
+                        <div class="input-group">
+                            <label>URL do Logotipo</label>
+                            <input type="url" id="configLogo" placeholder="https://...">
+                        </div>
+                        <div class="input-group">
+                            <label>Cor do Tema</label>
+                            <input type="color" id="configCor" style="height: 42px; padding: 2px;">
+                        </div>
+                        <button type="submit" class="btn-primary">Salvar Configurações</button>
+                    </form>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modal de Produto -->
+    <div class="modal" id="productModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Novo Produto</h3>
+                <button class="close-btn" onclick="admin.closeProductModal()">✕</button>
+            </div>
+            <form id="productForm" onsubmit="admin.saveProduct(event)">
+                <input type="hidden" id="productId">
+                
+                <div class="form-row">
+                    <div class="input-group">
+                        <label>Nome *</label>
+                        <input type="text" id="prodNome" required>
+                    </div>
+                    <div class="input-group">
+                        <label>Categoria *</label>
+                        <select id="prodCategoria" required>
+                            <option value="Lanches">Lanches</option>
+                            <option value="Bebidas">Bebidas</option>
+                            <option value="Doces">Doces</option>
+                            <option value="Combos">Combos</option>
+                            <option value="Salgados">Salgados</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="input-group">
+                    <label>Descrição</label>
+                    <textarea id="prodDescricao" rows="2"></textarea>
+                </div>
+                
+                <div class="form-row">
+                    <div class="input-group">
+                        <label>Preço *</label>
+                        <input type="number" id="prodPreco" step="0.01" min="0" required>
+                    </div>
+                    <div class="input-group">
+                        <label>Preço de Custo</label>
+                        <input type="number" id="prodCusto" step="0.01" min="0">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="input-group">
+                        <label>Estoque *</label>
+                        <input type="number" id="prodEstoque" min="0" required>
+                    </div>
+                    <div class="input-group">
+                        <label>Estoque Mínimo</label>
+                        <input type="number" id="prodEstoqueMin" min="0" value="5">
+                    </div>
+                </div>
+                
+                <div class="input-group">
+                    <label>URL da Imagem</label>
+                    <input type="url" id="prodImagem" placeholder="https://...">
+                </div>
+                
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="prodDestaque">
+                        Produto em Destaque
+                    </label>
+                    <label>
+                        <input type="checkbox" id="prodAtivo" checked>
+                        Ativo
+                    </label>
+                </div>
+                
+                <div class="modal-footer">
+                    <button type="button" class="btn-secondary" onclick="admin.closeProductModal()">Cancelar</button>
+                    <button type="submit" class="btn-primary">Salvar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="admin-script.js"></script>
+</body>
+</html>

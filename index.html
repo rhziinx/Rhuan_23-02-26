@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0f0f11">
+    <meta name="description" content="Cardápio digital profissional - Faça seu pedido online">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    
+    <title>Cantina Digital - Cardápio Online</title>
+    
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/icons/icon-192x192.png">
+    <link rel="stylesheet" href="styles.css?v=10">
+    
+    <style>
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+    
+    <!-- Preconnect para performance -->
+    <link rel="preconnect" href="http://localhost:8000">
+    <link rel="dns-prefetch" href="http://localhost:8000">
+    <!-- Fontes Racing e Assinatura -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Racing+Sans+One&family=Great+Vibes&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <div id="splash" class="splash-screen">
+            <div class="splash-content">
+                <div class="splash-logo">🏁</div>
+                <h1>Cantina Digital</h1>
+                <p>Cardápio Online</p>
+                <div class="loading-spinner"></div>
+            </div>
+        </div>
+
+        <!-- Assinatura Background -->
+        <div class="senna-signature-bg">Ayrton Senna</div>
+
+        <!-- Header Fixo -->
+        <header class="main-header" id="mainHeader">
+            <div class="header-container">
+                <div class="brand">
+                    <span class="brand-icon">🏎️</span>
+                    <div class="brand-text">
+                        <h1>Cantina Digital</h1>
+                        <span class="status-indicator online">● Online</span>
+                    </div>
+                </div>
+                
+                <button class="cart-btn" id="cartBtn" onclick="app.toggleCart()" aria-label="Carrinho">
+                    <!-- Ícone F1 -->
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M22.5 11h-2l-1-3h-3l-1 3h-4l-1-3H5L3 11H1v4h2l1 3h2l1-3h10l1 3h2l1-3h1.5v-4zM6.5 16c-0.83 0-1.5-0.67-1.5-1.5S5.67 13 6.5 13s1.5 0.67 1.5 1.5S7.33 16 6.5 16zM17.5 16c-0.83 0-1.5-0.67-1.5-1.5s0.67-1.5 1.5-1.5s1.5 0.67 1.5 1.5S18.33 16 17.5 16z"/>
+                    </svg>
+                    <span class="cart-badge" id="cartBadge">0</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Busca e Filtros -->
+        <div class="search-section">
+            <div class="search-box">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"/>
+                    <path d="M21 21L16.65 16.65"/>
+                </svg>
+                <input type="text" id="searchInput" placeholder="Buscar produtos..." autocomplete="off">
+            </div>
+            
+            <div class="categories-scroll" id="categoriesContainer">
+                <button class="category-chip active" data-category="todos">Todos</button>
+                <button class="category-chip" data-category="Lanches">🍔 Lanches</button>
+                <button class="category-chip" data-category="Bebidas">🥤 Bebidas</button>
+                <button class="category-chip" data-category="Doces">🍰 Doces</button>
+                <button class="category-chip" data-category="Combos">🎁 Combos</button>
+            </div>
+        </div>
+
+        <!-- Conteúdo Principal -->
+        <main class="main-content">
+            <!-- Banner de Destaques -->
+            <section class="highlights-section" id="highlightsSection" style="display: none;">
+                <h2>🔥 Destaques</h2>
+                <div class="highlights-scroll" id="highlightsContainer"></div>
+            </section>
+
+            <!-- Lista de Produtos -->
+            <section class="products-section">
+                <div class="section-header">
+                    <h2 id="sectionTitle">Cardápio</h2>
+                    <span class="results-count" id="resultsCount"></span>
+                </div>
+                
+                <div class="products-grid" id="productsGrid">
+                    <div class="skeleton-loader">
+                        <div class="skeleton-card"></div>
+                        <div class="skeleton-card"></div>
+                        <div class="skeleton-card"></div>
+                        <div class="skeleton-card"></div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Botão Admin -->
+        <a href="login.html" class="admin-fab" title="Área Administrativa">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 15V3M12 15L8 11M12 15L16 11M2 17L2.621 19.485C2.72915 19.9177 2.97882 20.3018 3.33033 20.5763C3.68184 20.8508 4.11501 20.9999 4.561 21H19.439C19.885 20.9999 20.3182 20.8508 20.6697 20.5763C21.0212 20.3018 21.2708 19.9177 21.379 19.485L22 17"/>
+            </svg>
+        </a>
+
+        <!-- Modal do Carrinho -->
+        <div class="modal cart-modal" id="cartModal">
+            <div class="modal-overlay" onclick="app.toggleCart()"></div>
+            <div class="modal-content cart-content">
+                <div class="cart-header">
+                    <h2>Seu Pedido</h2>
+                    <button class="close-btn" onclick="app.toggleCart()">✕</button>
+                </div>
+                
+                <div class="cart-body" id="cartBody">
+                    <div class="empty-state">
+                        <div class="empty-icon">🛒</div>
+                        <p>Seu carrinho está vazio</p>
+                        <span>Adicione itens para começar</span>
+                    </div>
+                </div>
+
+                <div class="cart-footer" id="cartFooter" style="display: none;">
+                    <div class="cart-summary">
+                        <div class="summary-row">
+                            <span>Subtotal</span>
+                            <span id="subtotalValue">R$ 0,00</span>
+                        </div>
+                        <div class="summary-row" id="discountRow" style="display: none;">
+                            <span>Desconto</span>
+                            <span id="discountValue">- R$ 0,00</span>
+                        </div>
+                        <div class="summary-row total">
+                            <span>Total</span>
+                            <span id="totalValue">R$ 0,00</span>
+                        </div>
+                    </div>
+                    <button class="btn-primary btn-large" onclick="app.checkout()">
+                        Finalizar Pedido
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M5 12H19M19 12L12 5M19 12L12 19"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal de Checkout -->
+        <div class="modal checkout-modal" id="checkoutModal">
+            <div class="modal-overlay" onclick="app.closeCheckout()"></div>
+            <div class="modal-content checkout-content">
+                <div class="modal-header">
+                    <button class="back-btn" onclick="app.closeCheckout()">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M19 12H5M5 12L12 19M5 12L12 5"/>
+                        </svg>
+                    </button>
+                    <h2>Finalizar Pedido</h2>
+                    <div style="width: 40px;"></div>
+                </div>
+
+                <div class="checkout-body">
+                    <!-- Passo 1: Dados do Cliente -->
+                    <div class="checkout-step active" id="step1">
+                        <h3>Seus Dados</h3>
+                        <form id="customerForm" class="form-group">
+                            <div class="input-group">
+                                <label for="customerName">Nome *</label>
+                                <input type="text" id="customerName" required placeholder="Seu nome completo">
+                            </div>
+                            <div class="input-group">
+                                <label for="customerPhone">WhatsApp *</label>
+                                <input type="tel" id="customerPhone" required placeholder="(11) 99999-9999" maxlength="15">
+                            </div>
+                            <div class="input-group">
+                                <label for="orderObs">Observações</label>
+                                <textarea id="orderObs" rows="2" placeholder="Alguma observação especial?"></textarea>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- Passo 2: Pagamento -->
+                    <div class="checkout-step" id="step2">
+                        <h3>Forma de Pagamento</h3>
+                        <div class="payment-methods">
+                            <label class="payment-option">
+                                <input type="radio" name="payment" value="pix" checked>
+                                <div class="payment-card">
+                                    <span class="payment-icon">📱</span>
+                                    <div class="payment-info">
+                                        <strong>PIX</strong>
+                                        <span>Confirmação imediata</span>
+                                    </div>
+                                </div>
+                            </label>
+                            
+                            <label class="payment-option">
+                                <input type="radio" name="payment" value="cartao">
+                                <div class="payment-card">
+                                    <span class="payment-icon">💳</span>
+                                    <div class="payment-info">
+                                        <strong>Cartão</strong>
+                                        <span>Na entrega ou maquininha</span>
+                                    </div>
+                                </div>
+                            </label>
+                            
+                            <label class="payment-option">
+                                <input type="radio" name="payment" value="dinheiro">
+                                <div class="payment-card">
+                                    <span class="payment-icon">💵</span>
+                                    <div class="payment-info">
+                                        <strong>Dinheiro</strong>
+                                        <span>Troco para R$ <input type="number" id="trocoPara" placeholder="0,00" step="0.01"></span>
+                                    </div>
+                                </div>
+                            </label>
+                        </div>
+
+                        <!-- Área PIX -->
+                        <div class="pix-area" id="pixArea">
+                            <div class="pix-qr">
+                                <img id="pixQrCode" src="" alt="QR Code PIX">
+                            </div>
+                            <p class="pix-instruction">Escaneie o QR Code ou copie a chave:</p>
+                            <div class="pix-key">
+                                <code id="pixKey">cantina@email.com</code>
+                                <button class="btn-copy" onclick="app.copyPixKey()">Copiar</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Passo 3: Confirmação -->
+                    <div class="checkout-step" id="step3">
+                        <div class="success-animation">
+                            <div class="checkmark">✓</div>
+                        </div>
+                        <h3>Pedido Confirmado!</h3>
+                        <p class="order-code">Nº <strong id="orderCode">PED-000001</strong></p>
+                        <p class="order-message">Seu pedido foi recebido e já está sendo preparado.</p>
+                        <div class="order-timeline">
+                            <div class="timeline-item active">
+                                <span class="dot"></span>
+                                <span>Pedido Recebido</span>
+                            </div>
+                            <div class="timeline-item">
+                                <span class="dot"></span>
+                                <span>Em Preparação</span>
+                            </div>
+                            <div class="timeline-item">
+                                <span class="dot"></span>
+                                <span>Pronto</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="checkout-footer" id="checkoutFooter">
+                    <button class="btn-primary btn-large" id="checkoutActionBtn" onclick="app.nextStep()">
+                        Continuar
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div class="toast-container" id="toastContainer"></div>
+
+        <!-- Offline Indicator -->
+        <div class="offline-banner" id="offlineBanner">
+            <span>⚠️ Você está offline. Algumas funcionalidades podem não funcionar.</span>
+        </div>
+    </div>
+
+    <script src="script.js?v=10"></script>
+    <script>
+        // Registrar Service Worker para PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(console.error);
+        }
+    </script>
+</body>
+</html>
