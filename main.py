@@ -1,14 +1,16 @@
-from typing import Optional, List, Dict
+from typing import Optional, List
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, Index
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from sqlalchemy.sql import func
-from pydantic import BaseModel, Field, field_validator, ConfigDict
-from datetime import datetime, timedelta
+from pydantic import BaseModel, Field, ConfigDict
+from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import secrets
@@ -44,8 +46,8 @@ Base = declarative_base()
 # Enums
 class StatusPedido(str, Enum):
     AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
-    PAGO = "pago"
-    PREPARANDO = "preparando"
+    AGENDADO = "agendado"
+    PREPARANDO = "preparando"    
     PRONTO = "pronto"
     ENTREGUE = "entregue"
     CANCELADO = "cancelado"
@@ -115,6 +117,7 @@ class Pedido(Base):
     cliente_nome = Column(String(100), nullable=True)  # Para pedidos sem cadastro
     cliente_telefone = Column(String(20), nullable=True)
     status = Column(String(50), default=StatusPedido.AGUARDANDO_PAGAMENTO.value)
+    data_retirada = Column(DateTime, nullable=False)
     forma_pagamento = Column(String(50), nullable=True)
     total = Column(Float, nullable=False)
     desconto = Column(Float, default=0.0)
@@ -224,7 +227,7 @@ class ProdutoResponse(BaseModel):
     descricao: Optional[str]
     preco: float
     categoria: str
-    imagem_url: str
+    imagem_url: Optional[str] = None
     estoque: int
     estoque_minimo: int
     ativo: bool
@@ -246,7 +249,8 @@ class ItemPedidoCreate(BaseModel):
     observacao: Optional[str] = None
 
 class PedidoCreate(BaseModel):
-    itens: List[ItemPedidoCreate]
+    itens: List[ItemPedidoCreate] = Field(..., min_length=1, description="O pedido deve conter pelo menos um item")
+    data_retirada: datetime
     cliente_nome: Optional[str] = Field(None, max_length=100)
     cliente_telefone: Optional[str] = None
     mesa: Optional[str] = None
@@ -260,6 +264,7 @@ class PedidoResponse(BaseModel):
     codigo: str
     cliente_nome: Optional[str]
     status: str
+    data_retirada: Optional[datetime]
     forma_pagamento: Optional[str]
     total: float
     desconto: float
@@ -303,6 +308,7 @@ class DashboardStats(BaseModel):
     produtos_baixo_estoque: int
     pedidos_pendentes: int
     vendas_semana: List[dict]
+    top_produtos: List[dict]
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
@@ -312,7 +318,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -320,6 +326,34 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 async def lifespan(app: FastAPI):
     # Garantir que as tabelas existam
     Base.metadata.create_all(bind=engine)
+    
+    # --- CORRECAO AUTOMATICA DE BANCO DE DADOS (MIGRATION) ---
+    try:
+        with engine.connect() as conn:
+            # Verificar colunas faltantes na tabela pedidos
+            result = conn.execute(text("PRAGMA table_info(pedidos)"))
+            existing_columns = {row.name for row in result.fetchall()}
+            
+            missing_cols = [
+                ("data_retirada", "DATETIME"),
+                ("forma_pagamento", "VARCHAR(50)"),
+                ("desconto", "FLOAT DEFAULT 0"),
+                ("taxa_entrega", "FLOAT DEFAULT 0"),
+                ("mesa", "VARCHAR(10)"),
+                ("pago_at", "DATETIME"),
+                ("entregue_at", "DATETIME")
+            ]
+            
+            for col_name, col_type in missing_cols:
+                if col_name not in existing_columns:
+                    logger.info(f"Migrando: Adicionando coluna '{col_name}' na tabela 'pedidos'")
+                    conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN {col_name} {col_type}"))
+            
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Erro na migracao automatica: {e}")
+    # ---------------------------------------------------------
+
     db = SessionLocal()
     try:
         # Criar usuário admin padrão se não existir
@@ -426,6 +460,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Middleware de Compressão (Melhora performance em redes móveis)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return Response(status_code=204)
@@ -452,10 +489,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if usuario is None or not usuario.is_ativo:
         raise HTTPException(status_code=401, detail="Usuário não encontrado ou inativo")
     return usuario
-
-@app.get("/")
-def read_root():
-    return {"message": "API da Cantina Online! Acesse /docs para ver a documentação."}
 
 @app.get("/config/public")
 def get_public_config(db: Session = Depends(get_db)):
@@ -514,7 +547,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         expires_delta=access_token_expires
     )
     
-    usuario.ultimo_acesso = datetime.utcnow()
+    usuario.ultimo_acesso = datetime.now(timezone.utc)
     db.commit()
     
     return {
@@ -709,6 +742,7 @@ def criar_pedido(pedido: PedidoCreate, db: Session = Depends(get_db)):
     db_pedido = Pedido(
         codigo=gerar_codigo_pedido(db),
         cliente_nome=pedido.cliente_nome,
+        data_retirada=pedido.data_retirada,
         cliente_telefone=pedido.cliente_telefone,
         mesa=pedido.mesa,
         total=total,
@@ -776,15 +810,15 @@ def pagar_pedido(
     if pedido.status != StatusPedido.AGUARDANDO_PAGAMENTO.value:
         raise HTTPException(status_code=400, detail="Pedido já foi pago ou cancelado")
     
-    pedido.status = StatusPedido.PAGO.value
+    pedido.status = StatusPedido.AGENDADO.value
     pedido.forma_pagamento = forma_pagamento.value
     pedido.pago_at = datetime.utcnow()
     db.commit()
     
-    log_acao(db, "PAGAMENTO", None, 
-             f"Pedido {pedido.codigo} pago via {forma_pagamento.value}")
+    log_acao(db, "AGENDAMENTO", None, 
+             f"Pedido {pedido.codigo} agendado e pago via {forma_pagamento.value}")
     
-    return {"msg": "Pagamento confirmado", "pedido": pedido.codigo}
+    return {"msg": "Pagamento confirmado e pedido agendado", "pedido": pedido.codigo}
 
 @app.put("/pedidos/{pedido_id}/status")
 def atualizar_status_pedido(
@@ -843,16 +877,16 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: Usuario = D
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    hoje = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    hoje = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Vendas hoje
+    # Vendas agendadas para hoje
     vendas_hoje = db.query(func.sum(Pedido.total)).filter(
-        Pedido.created_at >= hoje,
-        Pedido.status.in_([StatusPedido.PAGO.value, StatusPedido.ENTREGUE.value])
+        func.date(Pedido.created_at) == hoje.date(),
+        Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
     ).scalar() or 0
     
     pedidos_hoje = db.query(Pedido).filter(
-        Pedido.created_at >= hoje
+        func.date(Pedido.created_at) == hoje.date()
     ).count()
     
     ticket_medio = vendas_hoje / pedidos_hoje if pedidos_hoje > 0 else 0
@@ -865,7 +899,7 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: Usuario = D
     
     # Pedidos pendentes
     pendentes = db.query(Pedido).filter(
-        Pedido.status.in_([StatusPedido.AGUARDANDO_PAGAMENTO.value, StatusPedido.PAGO.value, StatusPedido.PREPARANDO.value])
+        Pedido.status.in_([StatusPedido.AGUARDANDO_PAGAMENTO.value, StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value])
     ).count()
     
     # Vendas da semana (últimos 7 dias)
@@ -876,8 +910,18 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: Usuario = D
         func.count(Pedido.id).label('quantidade')
     ).filter(
         Pedido.created_at >= semana_atras,
-        Pedido.status.in_([StatusPedido.PAGO.value, StatusPedido.ENTREGUE.value])
+        Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
     ).group_by(func.date(Pedido.created_at)).all()
+    
+    # Top 5 Produtos mais vendidos
+    top_produtos = db.query(
+        Produto.nome,
+        func.sum(ItemPedido.quantidade).label('total_vendido')
+    ).join(ItemPedido, Produto.id == ItemPedido.produto_id)\
+     .join(Pedido, Pedido.id == ItemPedido.pedido_id)\
+     .filter(
+        Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
+    ).group_by(Produto.id, Produto.nome).order_by(func.sum(ItemPedido.quantidade).desc()).limit(5).all()
     
     return {
         "total_vendas_hoje": round(vendas_hoje, 2),
@@ -885,7 +929,8 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: Usuario = D
         "ticket_medio_hoje": round(ticket_medio, 2),
         "produtos_baixo_estoque": baixo_estoque,
         "pedidos_pendentes": pendentes,
-        "vendas_semana": [{"data": str(v.data), "total": float(v.total), "quantidade": v.quantidade} for v in vendas_semana]
+        "vendas_semana": [{"data": str(v.data), "total": float(v.total), "quantidade": v.quantidade} for v in vendas_semana],
+        "top_produtos": [{"nome": tp.nome, "quantidade": tp.total_vendido} for tp in top_produtos]
     }
 
 @app.get("/relatorios/vendas")
@@ -905,7 +950,7 @@ def relatorio_vendas(
         Pedido.forma_pagamento
     ).filter(
         Pedido.created_at.between(data_inicio, data_fim),
-        Pedido.status.in_([StatusPedido.PAGO.value, StatusPedido.ENTREGUE.value])
+        Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
     ).group_by(func.date(Pedido.created_at), Pedido.forma_pagamento).all()
     
     return {
@@ -913,6 +958,9 @@ def relatorio_vendas(
         "vendas": [{"data": str(v.data), "total": float(v.total), "quantidade": v.quantidade, "forma_pagamento": v.forma_pagamento} for v in vendas]
     }
 
+# Servir arquivos estáticos (Frontend) - DEVE SER O ÚLTIMO
+app.mount("/", StaticFiles(directory=".", html=True), name="static")
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

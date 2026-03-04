@@ -90,6 +90,18 @@ html {
     text-rendering: optimizeLegibility;
 }
 
+/* Scrollbar Personalizada (Premium) */
+::-webkit-scrollbar {
+    width: 8px;
+}
+::-webkit-scrollbar-track {
+    background: var(--asphalt-dark);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--carbon-fiber);
+    border-radius: 4px;
+}
+
 /* Background Animado */
 body::before {
     content: '';
@@ -127,6 +139,33 @@ body {
     z-index: -1;
     pointer-events: none;
     user-select: none;
+}
+
+/* Frase do Senna */
+.senna-quote {
+    position: fixed;
+    bottom: 30px;
+    left: 30px;
+    max-width: 320px;
+    font-family: var(--font-sans);
+    font-style: italic;
+    font-size: 0.95rem;
+    color: rgba(255, 255, 255, 0.5);
+    z-index: 0;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+    pointer-events: none;
+    line-height: 1.5;
+}
+
+.senna-quote::after {
+    content: '- Ayrton Senna';
+    display: block;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--senna-yellow);
+    font-family: var(--font-racing);
+    font-style: normal;
 }
 
 /* Splash Screen */
@@ -272,6 +311,18 @@ body {
     box-shadow: 0 0 10px rgba(230, 0, 0, 0.5);
 }
 
+/* Animação de Pulso para Carrinho com Itens */
+.cart-btn.pulse-animation {
+    animation: cartPulse 2s infinite;
+    border-color: var(--senna-yellow);
+}
+
+@keyframes cartPulse {
+    0% { box-shadow: 0 0 0 0 rgba(255, 215, 0, 0.4); }
+    70% { box-shadow: 0 0 0 10px rgba(255, 215, 0, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 215, 0, 0); }
+}
+
 .cart-badge {
     position: absolute;
     top: -4px;
@@ -377,6 +428,7 @@ body {
     color: white;
     border-color: var(--senna-red);
     box-shadow: 0 0 10px rgba(230, 0, 0, 0.3);
+    transform: scale(1.05);
 }
 
 /* Conteúdo Principal */
@@ -487,23 +539,26 @@ body {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: var(--space-5);
+    perspective: 1000px; /* Essencial para o efeito 3D */
 }
 
 .product-card {
-    background: var(--asphalt-light);
+    background: rgba(26, 26, 29, 0.7); /* Mais transparente */
+    backdrop-filter: blur(10px); /* Efeito de vidro fosco */
     border-radius: var(--radius-xl);
     overflow: hidden;
     box-shadow: var(--shadow);
     transition: all var(--transition-base);
-    border: 1px solid var(--border-color);
+    border: 1px solid rgba(255, 255, 255, 0.08); /* Borda sutil */
     display: flex;
     flex-direction: column;
 }
 
 .product-card:hover {
-    transform: translateY(-4px);
-    box-shadow: var(--shadow-glow);
+    box-shadow: 0 20px 40px rgba(0,0,0,0.4), 0 0 20px rgba(230, 0, 0, 0.2);
     border-color: var(--senna-red);
+    transform: translateY(-8px) scale(1.02);
+    z-index: 10;
 }
 
 .product-image-container {
@@ -654,27 +709,34 @@ body {
 
 /* Skeleton Loading */
 .skeleton-loader {
-    display: contents;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-5);
+    width: 100%;
 }
 
 .skeleton-card {
-    background: var(--asphalt-light);
+    background: var(--carbon-fiber);
     border-radius: var(--radius-xl);
-    height: 320px;
+    height: 400px;
     position: relative;
     overflow: hidden;
+    border: 1px solid var(--border-color);
 }
 
-.skeleton-card::after {
-    content: '';
+/* Animação de Brilho (Shimmer) */
+.skeleton-shimmer {
     position: absolute;
-    inset: 0;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
-    animation: shimmer 2s infinite;
+    transform: translateX(-100%);
+    animation: shimmer 1.5s infinite;
 }
 
 @keyframes shimmer {
-    0% { transform: translateX(-100%); }
     100% { transform: translateX(100%); }
 }
 
@@ -926,12 +988,30 @@ body {
     font-family: var(--font-racing);
     transition: all var(--transition-base);
     box-shadow: 0 4px 15px rgba(230, 0, 0, 0.3);
+    position: relative;
+    overflow: hidden;
 }
 
 .btn-primary:hover {
     filter: brightness(1.1);
     transform: translateY(-2px);
     box-shadow: 0 6px 20px rgba(230, 0, 0, 0.4);
+}
+
+/* Efeito de Brilho (Shine) ao passar o mouse */
+.btn-primary::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+    transition: 0.5s;
+}
+
+.btn-primary:hover::after {
+    left: 100%;
 }
 
 .btn-primary:active {
@@ -1288,6 +1368,13 @@ body {
     transition: all var(--transition-base);
     z-index: 100;
     border: 1px solid var(--border-color);
+    animation: float 4s ease-in-out infinite;
+}
+
+@keyframes float {
+    0% { transform: translateY(0px); }
+    50% { transform: translateY(-10px); }
+    100% { transform: translateY(0px); }
 }
 
 .admin-fab:hover {
@@ -1297,7 +1384,15 @@ body {
 }
 
 /* Responsividade */
-@media (max-width: 640px) {
+@media (max-width: 768px) {
+    .senna-quote {
+        display: none; /* Esconder em telas muito pequenas para não poluir */
+    }
+    
+    .main-content {
+        padding: var(--space-4);
+    }
+
     .products-grid {
         grid-template-columns: repeat(2, 1fr);
         gap: var(--space-3);
@@ -1323,9 +1418,35 @@ body {
         font-size: var(--text-base);
     }
     
+    .product-image-container {
+        aspect-ratio: 1;
+    }
+    
+    .product-info {
+        padding: var(--space-3);
+    }
+    
+    .product-name {
+        font-size: var(--text-sm);
+    }
+    
+    .product-description {
+        display: none;
+    }
+    
+    .product-price {
+        font-size: var(--text-base);
+    }
+    
     .modal-content {
         max-height: 95vh;
         border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    }
+}
+
+@media (max-width: 480px) {
+    .products-grid {
+        grid-template-columns: 1fr; /* Coluna única em telas muito estreitas */
     }
 }
 

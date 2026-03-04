@@ -1,11 +1,12 @@
-const API_URL = 'http://localhost:8000';
+const API_URL = window.location.protocol === 'file:' ? 'http://localhost:8000' : window.location.origin;
 
 class AdminPanel {
     constructor() {
         this.token = localStorage.getItem('token');
         this.currentSection = 'dashboard';
         this.charts = {};
-        this.currentStatusFilter = 'pago'; // Padrão: mostrar apenas pedidos pagos (Novos)
+        this.isLive = false;
+        this.liveInterval = null;
         
         this.init();
     }
@@ -19,6 +20,7 @@ class AdminPanel {
         this.bindEvents();
         this.loadUser();
         this.showSection('dashboard');
+        this.loadChartJS(); // Iniciar carregamento dos gráficos
         this.loadConfig(); // Carregar tema e configurações ao iniciar
         this.startAutoRefresh();
     }
@@ -42,6 +44,17 @@ class AdminPanel {
         if (dataInicio) dataInicio.value = inicioMes;
         if (dataFim) dataFim.value = hoje;
     }
+
+    // --- CARREGAMENTO SEGURO DO CHART.JS ---
+    loadChartJS() {
+        if (typeof Chart !== 'undefined') return; // Já carregado via HTML
+        
+        const script = document.createElement('script');
+        script.src = "https://cdn.jsdelivr.net/npm/chart.js";
+        script.onload = () => this.refreshData(); // Recarrega dados quando terminar de baixar
+        document.head.appendChild(script);
+    }
+    // ---------------------------------------
     
     async loadUser() {
         try {
@@ -107,6 +120,7 @@ class AdminPanel {
             
             // Gráfico
             this.renderChart(stats.vendas_semana);
+            this.renderTopProductsChart(stats.top_produtos);
             
             // Pedidos recentes
             this.loadPedidosRecentes();
@@ -120,6 +134,12 @@ class AdminPanel {
     renderChart(vendasData) {
         const ctx = document.getElementById('vendasChart');
         if (!ctx) return;
+
+        // Proteção: Se o Chart.js ainda não carregou, tenta de novo em 500ms
+        if (typeof Chart === 'undefined') {
+            setTimeout(() => this.renderChart(vendasData), 500);
+            return;
+        }
         
         if (this.charts.vendas) {
             this.charts.vendas.destroy();
@@ -139,7 +159,7 @@ class AdminPanel {
                 datasets: [{
                     label: 'Vendas (R$)',
                     data: valores,
-                    borderColor: '#f97316',
+                    borderColor: '#E60000',
                     backgroundColor: 'rgba(249, 115, 22, 0.1)',
                     fill: true,
                     tension: 0.4
@@ -153,18 +173,66 @@ class AdminPanel {
                 },
                 scales: {
                     y: {
-                        beginAtZero: true,
+                        grid: { color: 'rgba(255,255,255,0.1)' },
                         ticks: {
-                            callback: function(value) {
-                                return 'R$ ' + value.toFixed(0);
-                            }
-                        }
+                            color: '#a1a1aa',
+                            callback: function(value) { return 'R$ ' + value.toFixed(0); }
+                        },
+                        beginAtZero: true,
+                    },
+                    x: {
+                        grid: { color: 'rgba(255,255,255,0.1)' },
+                        ticks: { color: '#a1a1aa' }
                     }
                 }
             }
         });
     }
+
     
+    renderTopProductsChart(produtosData) {
+        const ctx = document.getElementById('topProdutosChart');
+        if (!ctx) return;
+
+        // Proteção: Se o Chart.js ainda não carregou, tenta de novo em 500ms
+        if (typeof Chart === 'undefined') {
+            setTimeout(() => this.renderTopProductsChart(produtosData), 500);
+            return;
+        }
+
+        if (this.charts.topProdutos) {
+            this.charts.topProdutos.destroy();
+        }
+
+        const labels = produtosData.map(p => p.nome);
+        const data = produtosData.map(p => p.quantidade);
+
+        this.charts.topProdutos = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: data,
+                    backgroundColor: [
+                        '#E60000', // Senna Red
+                        '#FFD700', // Senna Yellow
+                        '#ffffff', // White
+                        '#a1a1aa', // Gray
+                        '#252529'  // Carbon
+                    ],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'right', labels: { color: '#ffffff', font: { family: 'Inter' } } }
+                }
+            }
+        });
+    }
+
     async loadPedidosRecentes() {
         try {
             const response = await fetch(`${API_URL}/pedidos?limit=5`, {
@@ -195,8 +263,8 @@ class AdminPanel {
     }
     
     async loadPedidos() {
-        const status = this.currentStatusFilter;
-        const url = status ? `${API_URL}/pedidos?status=${status}` : `${API_URL}/pedidos`;
+        // Busca todos os status ativos para o Kanban
+        const url = `${API_URL}/pedidos?status=agendado,preparando,pronto`;
         
         try {
             const response = await fetch(url, {
@@ -206,54 +274,61 @@ class AdminPanel {
             if (!response.ok) throw new Error('Falha ao carregar pedidos');
             
             const pedidos = await response.json();
-            const grid = document.getElementById('pedidosGrid');
             
-            if (pedidos.length === 0) {
-                grid.innerHTML = '<div class="loading">Nenhum pedido encontrado</div>';
-                return;
-            }
+            // Limpar colunas
+            document.getElementById('kanban-agendado').innerHTML = '';
+            document.getElementById('kanban-preparando').innerHTML = '';
+            document.getElementById('kanban-pronto').innerHTML = '';
             
-            grid.innerHTML = pedidos.map(p => `
-                <div class="pedido-card">
-                    <div class="pedido-card-header">
-                        <span class="pedido-code">${p.codigo}</span>
-                        <span class="status-badge ${p.status}">${this.formatStatus(p.status)}</span>
-                    </div>
-                    <div class="pedido-itens">
-                        ${p.itens.map(i => `${i.quantidade}x ${i.produto_nome}`).join('<br>')}
-                    </div>
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                        <strong style="color: #f97316; font-size: 1.25rem;">R$ ${p.total.toFixed(2)}</strong>
-                        <span style="color: #64748b; font-size: 0.875rem;">
-                            ${new Date(p.created_at).toLocaleString()}
-                        </span>
-                    </div>
-                    <div class="pedido-actions">
-                        ${this.getStatusActions(p)}
-                    </div>
-                </div>
-            `).join('');
+            // Contadores
+            let counts = { agendado: 0, preparando: 0, pronto: 0 };
+
+            pedidos.forEach(p => {
+                const colId = `kanban-${p.status}`;
+                const container = document.getElementById(colId);
+                
+                if (container) {
+                    counts[p.status]++;
+                    const card = document.createElement('div');
+                    card.className = 'k-card';
+                    card.innerHTML = `
+                        <div class="k-card-header">
+                            <span class="k-code">${p.codigo}</span>
+                            <span class="k-time">${new Date(p.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                        </div>
+                        <div class="k-items">
+                            <div style="color: #fff; font-weight: bold; margin-bottom: 4px;">${p.cliente_nome || 'Cliente'}</div>
+                            ${p.itens.map(i => `• ${i.quantidade}x ${i.produto_nome}`).join('<br>')}
+                            ${p.observacoes ? `<br><em style="color: #f59e0b; font-size: 0.8rem;">Obs: ${p.observacoes}</em>` : ''}
+                        </div>
+                        <div class="k-actions">
+                            ${this.getKanbanButton(p)}
+                        </div>
+                    `;
+                    container.appendChild(card);
+                }
+            });
             
+            // Atualizar badges
+            document.getElementById('count-agendado').textContent = counts.agendado;
+            document.getElementById('count-preparando').textContent = counts.preparando;
+            document.getElementById('count-pronto').textContent = counts.pronto;
+
         } catch (error) {
             console.error('Erro:', error);
-            document.getElementById('pedidosGrid').innerHTML = '<div class="loading" style="color: #ef4444;">Erro ao carregar pedidos. Tente novamente.</div>';
+            this.showToast('Erro ao atualizar Kanban', 'error');
         }
     }
     
-    getStatusActions(pedido) {
-        const actions = [];
-        
-        if (pedido.status === 'pago') {
-            actions.push(`<button class="btn-primary" onclick="admin.updateStatus(${pedido.id}, 'preparando')">Iniciar Preparo</button>`);
+    getKanbanButton(pedido) {
+        if (pedido.status === 'agendado') {
+            return `<button class="k-btn next" onclick="admin.updateStatus(${pedido.id}, 'preparando')">Iniciar Preparo ➜</button>`;
         } else if (pedido.status === 'preparando') {
-            actions.push(`<button class="btn-primary" onclick="admin.updateStatus(${pedido.id}, 'pronto')">Marcar Pronto</button>`);
+            return `<button class="k-btn next" style="background: #f59e0b; color: black;" onclick="admin.updateStatus(${pedido.id}, 'pronto')">Marcar Pronto ➜</button>`;
         } else if (pedido.status === 'pronto') {
-            actions.push(`<button class="btn-primary" onclick="admin.updateStatus(${pedido.id}, 'entregue')">Entregar</button>`);
+            return `<button class="k-btn next" style="background: #10b981;" onclick="admin.updateStatus(${pedido.id}, 'entregue')">Entregar (Finalizar) ✓</button>`;
         }
-        
-        actions.push(`<button class="btn-secondary" onclick="admin.printOrder(${pedido.id})">🖨️ Imprimir</button>`);
-        
-        return actions.join('');
+        return '';
     }
     
     async updateStatus(pedidoId, status) {
@@ -264,25 +339,13 @@ class AdminPanel {
             });
             
             if (response.ok) {
-                this.showToast('Status atualizado!', 'success');
+                // this.showToast('Status atualizado!', 'success'); // Opcional, removido para ser mais rápido
                 this.loadPedidos();
                 this.loadDashboard();
             }
         } catch (error) {
             this.showToast('Erro ao atualizar status', 'error');
         }
-    }
-    
-    formatStatus(status) {
-        const map = {
-            'aguardando_pagamento': 'Aguardando',
-            'pago': 'Pago',
-            'preparando': 'Preparando',
-            'pronto': 'Pronto',
-            'entregue': 'Entregue',
-            'cancelado': 'Cancelado'
-        };
-        return map[status] || status;
     }
     
     async loadProdutos() {
@@ -559,30 +622,22 @@ class AdminPanel {
             this.showToast('Erro ao gerar relatório', 'error');
         }
     }
-    filtrarPedidos(status) {
-        this.currentStatusFilter = status;
-        
-        // Atualizar visual das abas
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.getAttribute('onclick').includes(`'${status}'`));
-        });
-        
-        this.loadPedidos();
-    }
     
     refreshData() {
         if (this.currentSection === 'dashboard') {
             this.loadDashboard();
+        } else if (this.currentSection === 'pedidos') {
+            this.loadPedidos();
         }
     }
     
     startAutoRefresh() {
-        // Atualizar dashboard a cada 30 segundos se estiver visível
+        // Atualizar a cada 10 segundos para o Kanban ficar "vivo"
         setInterval(() => {
-            if (this.currentSection === 'dashboard' && document.visibilityState === 'visible') {
-                this.loadDashboard();
+            if (document.visibilityState === 'visible') {
+                this.refreshData();
             }
-        }, 30000);
+        }, 10000);
     }
     
     printOrder(pedidoId) {
@@ -612,6 +667,109 @@ class AdminPanel {
             toast.style.opacity = '0';
             setTimeout(() => toast.remove(), 300);
         }, 3000);
+    }
+
+    // --- MODO LIVE (SIMULAÇÃO) ---
+    toggleLiveMode() {
+        this.isLive = !this.isLive;
+        const btn = document.getElementById('btnLive');
+        
+        if (this.isLive) {
+            btn.innerHTML = '<span style="font-size: 10px;">●</span> LIVE ON';
+            btn.classList.add('active');
+            this.showToast('Modo Live ativado! Pedidos chegando...', 'success');
+            this.startSimulation();
+        } else {
+            btn.innerHTML = '<span style="font-size: 10px;">●</span> LIVE OFF';
+            btn.classList.remove('active');
+            clearInterval(this.liveInterval);
+        }
+    }
+
+    startSimulation() {
+        // Tenta criar um pedido a cada 5 a 10 segundos
+        this.liveInterval = setInterval(() => {
+            if (Math.random() > 0.3) { // 70% de chance de criar
+                this.createRandomOrder();
+            }
+        }, 5000);
+    }
+
+    async createRandomOrder() {
+        // 1. Buscar produtos ativos para pegar IDs válidos
+        let produtos = [];
+        try {
+            const res = await fetch(`${API_URL}/produtos?ativos=true`);
+            if (res.ok) produtos = await res.json();
+        } catch (e) {
+            console.error("Erro ao buscar produtos para simulação");
+        }
+
+        if (produtos.length === 0) {
+            console.warn("Sem produtos para simular.");
+            return;
+        }
+
+        const nomes = ["Ayrton", "Rubinho", "Massa", "Hamilton", "Verstappen", "Leclerc", "Norris", "Alonso", "Vettel", "Schumacher"];
+        const cliente = nomes[Math.floor(Math.random() * nomes.length)];
+        
+        // Gera data para hoje daqui a 30 min
+        const data = new Date();
+        data.setMinutes(data.getMinutes() + 30);
+
+        // Payload do pedido simulado
+        const pedido = {
+            itens: [],
+            data_retirada: data.toISOString(),
+            cliente_nome: cliente,
+            cliente_telefone: "11999999999",
+            observacoes: "Pedido Simulado (Live Mode)",
+            forma_pagamento: "pix"
+        };
+
+        // Adiciona um ou mais produtos aleatórios ao pedido
+        const qtdItens = Math.floor(Math.random() * 3) + 1;
+        for (let i = 0; i < qtdItens; i++) {
+            const prod = produtos[Math.floor(Math.random() * produtos.length)];
+            pedido.itens.push({
+                produto_id: prod.id,
+                quantidade: 1,
+                observacao: ""
+            });
+        }
+
+        try {
+            const response = await fetch(`${API_URL}/pedidos`, {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.token}`
+                },
+                body: JSON.stringify(pedido)
+            });
+
+            if (response.ok) {
+                const novoPedido = await response.json();
+                
+                // 1. Simular pagamento (para mudar status para 'agendado' e registrar financeiro)
+                const payResponse = await fetch(`${API_URL}/pedidos/${novoPedido.id}/pagar?forma_pagamento=pix`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.token}` }
+                });
+
+                if (payResponse.ok) {
+                    this.showToast(`🔔 Novo pedido de ${cliente}!`, 'info');
+                    this.loadPedidos(); 
+                    this.loadDashboard();
+                } else {
+                    // Fallback: Se o pagamento falhar, força o status para 'agendado' via Admin
+                    console.warn("Pagamento falhou, forçando status...");
+                    await this.updateStatus(novoPedido.id, 'agendado');
+                }
+            }
+        } catch (e) { 
+            console.error("Erro na simulação", e); 
+        }
     }
 }
 

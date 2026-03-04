@@ -1,4 +1,4 @@
-const API_URL = 'http://localhost:8000';
+const API_URL = window.location.protocol === 'file:' ? 'http://localhost:8000' : window.location.origin;
 
 document.getElementById('loginForm').addEventListener('submit', async (event) => {
     event.preventDefault();
