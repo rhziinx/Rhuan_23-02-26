@@ -29,7 +29,7 @@ echo Ativando ambiente virtual...
 call venv\Scripts\activate
 
 echo Verificando e instalando bibliotecas (pode demorar na primeira vez)...
-pip install -r requirements.txt >nul
+python -m pip install -r requirements.txt >nul
 
 echo.
 echo ==========================================

@@ -1,10 +1,10 @@
 from typing import Optional, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -18,13 +18,30 @@ import os
 from enum import Enum
 import uuid
 import logging
+from logging.handlers import RotatingFileHandler
+import csv
+import io
 
-# Configuração de logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- CONFIGURAÇÃO DE LOGGING PROFISSIONAL ---
+# Cria um logger que escreve tanto no console quanto em arquivo
+logger = logging.getLogger("cantina_api")
+logger.setLevel(logging.INFO)
+
+# 1. Handler de Arquivo (Rotativo: Max 5MB, guarda os últimos 3 arquivos)
+file_handler = RotatingFileHandler("sistema.log", maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# 2. Handler de Console (Para ver na janela preta)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+logger.addHandler(console_handler)
+
+# Dicionário em memória para Rate Limiting de Login (IP -> {tentativas, bloqueado_ate})
+login_attempts = {}
 
 # Configurações de segurança
-SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
+SECRET_KEY = os.getenv("SECRET_KEY", "SUA_CHAVE_SECRETA_FIXA_PARA_DEV_NAO_USE_RANDOM_EM_PROD")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 horas
 
@@ -33,10 +50,11 @@ pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 security = HTTPBearer()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./cantina_v3.db")
+IS_PRODUCTION = os.getenv("ENV") == "production"
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
+    connect_args={"check_same_thread": False, "timeout": 15} if "sqlite" in DATABASE_URL else {},
     pool_pre_ping=True,
     echo=False
 )
@@ -245,16 +263,16 @@ class ItemPedidoResponse(BaseModel):
 
 class ItemPedidoCreate(BaseModel):
     produto_id: int
-    quantidade: int = Field(..., ge=1)
-    observacao: Optional[str] = None
+    quantidade: int = Field(..., ge=1, le=100, description="Quantidade máxima de 100 itens por produto")
+    observacao: Optional[str] = Field(None, max_length=150, description="Observação curta para o item")
 
 class PedidoCreate(BaseModel):
     itens: List[ItemPedidoCreate] = Field(..., min_length=1, description="O pedido deve conter pelo menos um item")
     data_retirada: datetime
     cliente_nome: Optional[str] = Field(None, max_length=100)
-    cliente_telefone: Optional[str] = None
-    mesa: Optional[str] = None
-    observacoes: Optional[str] = None
+    cliente_telefone: Optional[str] = Field(None, max_length=20)
+    mesa: Optional[str] = Field(None, max_length=10)
+    observacoes: Optional[str] = Field(None, max_length=500, description="Observações gerais do pedido")
     desconto: Optional[float] = Field(0, ge=0)
     taxa_entrega: Optional[float] = Field(0, ge=0)
 
@@ -327,6 +345,16 @@ async def lifespan(app: FastAPI):
     # Garantir que as tabelas existam
     Base.metadata.create_all(bind=engine)
     
+    # --- OTIMIZAÇÃO DE PERFORMANCE (WAL MODE) ---
+    if "sqlite" in DATABASE_URL:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL;"))
+                conn.execute(text("PRAGMA synchronous=NORMAL;"))
+                logger.info("SQLite WAL Mode ativado (Melhor performance de concorrência)")
+        except Exception as e:
+            logger.warning(f"Não foi possível ativar WAL mode: {e}")
+
     # --- CORRECAO AUTOMATICA DE BANCO DE DADOS (MIGRATION) ---
     try:
         with engine.connect() as conn:
@@ -451,7 +479,13 @@ app = FastAPI(
 )
 
 # CORS configurado para produção
-origins = ["*"]
+if IS_PRODUCTION:
+    # Em produção, liste EXATAMENTE os domínios permitidos
+    origins = ["https://sua-cantina.com", "https://admin.sua-cantina.com"]
+else:
+    # Em dev, permite tudo
+    origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -489,6 +523,16 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if usuario is None or not usuario.is_ativo:
         raise HTTPException(status_code=401, detail="Usuário não encontrado ou inativo")
     return usuario
+
+@app.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    """Rota para monitoramento verificar se a API e o Banco estão vivos"""
+    try:
+        # Tenta fazer uma query simples (SELECT 1)
+        db.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected", "timestamp": datetime.now(timezone.utc)}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database connection failed: {str(e)}")
 
 @app.get("/config/public")
 def get_public_config(db: Session = Depends(get_db)):
@@ -532,10 +576,39 @@ def log_acao(db: Session, acao: str, usuario_id: Optional[int] = None, detalhes:
 
 # Endpoints de Autenticação
 @app.post("/auth/login", response_model=TokenResponse)
-def login(request: LoginRequest, db: Session = Depends(get_db)):
-    usuario = db.query(Usuario).filter(Usuario.usuario == request.usuario).first()
+def login(login_data: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    # --- RATE LIMITING (SEGURANÇA) ---
+    client_ip = request.client.host
+    now = datetime.now()
     
-    if not usuario or not verify_password(request.senha, usuario.senha_hash):
+    # Verificar se o IP está bloqueado
+    if client_ip in login_attempts:
+        attempt = login_attempts[client_ip]
+        if attempt["blocked_until"] and now < attempt["blocked_until"]:
+            tempo_restante = (attempt["blocked_until"] - now).seconds
+            logger.warning(f"Login bloqueado para IP {client_ip}. Tentativas excessivas.")
+            raise HTTPException(
+                status_code=429, 
+                detail=f"Muitas tentativas falhas. Tente novamente em {tempo_restante} segundos."
+            )
+        # Se o tempo de bloqueio passou, reseta
+        if attempt["blocked_until"] and now >= attempt["blocked_until"]:
+            login_attempts[client_ip] = {"count": 0, "blocked_until": None}
+
+    usuario = db.query(Usuario).filter(Usuario.usuario == login_data.usuario).first()
+    
+    if not usuario or not verify_password(login_data.senha, usuario.senha_hash):
+        # Registrar falha
+        if client_ip not in login_attempts:
+            login_attempts[client_ip] = {"count": 0, "blocked_until": None}
+        
+        login_attempts[client_ip]["count"] += 1
+        
+        # Se errou 5 vezes, bloqueia por 15 minutos
+        if login_attempts[client_ip]["count"] >= 5:
+            login_attempts[client_ip]["blocked_until"] = now + timedelta(minutes=15)
+            logger.warning(f"IP {client_ip} bloqueado por 15 min após 5 falhas de login.")
+            
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
     
     if not usuario.is_ativo:
@@ -546,6 +619,10 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         data={"sub": usuario.usuario, "id": usuario.id, "is_admin": usuario.is_admin},
         expires_delta=access_token_expires
     )
+    
+    # Sucesso: Limpar tentativas do IP
+    if client_ip in login_attempts:
+        del login_attempts[client_ip]
     
     usuario.ultimo_acesso = datetime.now(timezone.utc)
     db.commit()
@@ -640,7 +717,7 @@ def criar_produto(
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    db_produto = Produto(**produto.dict())
+    db_produto = Produto(**produto.model_dump())
     db.add(db_produto)
     db.commit()
     db.refresh(db_produto)
@@ -662,7 +739,7 @@ def atualizar_produto(
     if not db_produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     
-    update_data = produto.dict(exclude_unset=True)
+    update_data = produto.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_produto, field, value)
     
@@ -692,6 +769,46 @@ def deletar_produto(
     log_acao(db, "DESATIVAR_PRODUTO", current_user.id, f"Produto {produto_id} desativado")
     return {"msg": "Produto desativado com sucesso"}
 
+# --- ROTA DE BACKUP (SEGURANÇA) ---
+@app.get("/admin/backup_db")
+def download_backup_db(current_user: Usuario = Depends(get_current_user)):
+    """Permite que o admin baixe uma cópia do banco de dados SQLite"""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+    
+    # Nome do arquivo de banco definido no DATABASE_URL ou padrão
+    db_filename = "cantina_v3.db"
+    
+    if not os.path.exists(db_filename):
+        raise HTTPException(status_code=404, detail="Arquivo de banco de dados não encontrado")
+    
+    filename_download = f"backup_cantina_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    return FileResponse(path=db_filename, filename=filename_download, media_type='application/x-sqlite3')
+
+# --- ROTA DE RESET (PERIGO / UTILITÁRIO) ---
+@app.delete("/admin/reset_db")
+def reset_database(
+    confirmacao: bool = False,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """PERIGO: Apaga todos os pedidos e logs! Útil para limpar testes."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+    
+    if not confirmacao:
+        raise HTTPException(status_code=400, detail="Para zerar, você deve marcar 'confirmacao' como true")
+    
+    # Limpar tabelas de movimento (Mantém Produtos e Usuários)
+    db.query(ItemPedido).delete()
+    db.query(Pedido).delete()
+    db.query(LogSistema).delete()
+    
+    db.commit()
+    
+    log_acao(db, "RESET_COMPLETO", current_user.id, "Banco de dados limpo via Admin")
+    return {"msg": "Sistema limpo! Todos os pedidos e históricos foram apagados."}
+
 @app.get("/produtos/estoque/baixo", response_model=List[ProdutoResponse])
 def produtos_baixo_estoque(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     if not current_user.is_admin:
@@ -710,19 +827,29 @@ def criar_pedido(pedido: PedidoCreate, db: Session = Depends(get_db)):
     itens_para_criar = []
     
     for item in pedido.itens:
-        produto = db.query(Produto).filter(Produto.id == item.produto_id).first()
-        if not produto or not produto.ativo:
-            raise HTTPException(status_code=400, detail=f"Produto {item.produto_id} não encontrado")
+        # --- CORREÇÃO DE CONCORRÊNCIA (ATOMIC UPDATE) ---
+        # Em vez de ler e depois escrever, tentamos atualizar diretamente no banco
+        # se houver estoque suficiente. Isso evita que dois usuários comprem o último item.
         
-        if produto.estoque < item.quantidade:
+        # 1. Tenta decrementar o estoque atomicamente
+        rows_affected = db.query(Produto).filter(
+            Produto.id == item.produto_id,
+            Produto.ativo == True,
+            Produto.estoque >= item.quantidade
+        ).update(
+            {"estoque": Produto.estoque - item.quantidade},
+            synchronize_session=False
+        )
+        
+        if rows_affected == 0:
+            # Se nenhuma linha foi afetada, ou o produto não existe ou não tem estoque
+            db.rollback() # Cancela tudo que foi feito até agora neste loop
             raise HTTPException(
                 status_code=400, 
-                detail=f"Estoque insuficiente para {produto.nome}. Disponível: {produto.estoque}"
+                detail=f"Estoque insuficiente ou produto indisponível para o ID {item.produto_id}. Tente novamente."
             )
-        
-        # Atualizar estoque
-        produto.estoque -= item.quantidade
-        
+            
+        produto = db.query(Produto).filter(Produto.id == item.produto_id).first()
         preco_unitario = produto.preco
         total += preco_unitario * item.quantidade
         
@@ -858,10 +985,12 @@ def cancelar_pedido(
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     
-    # Devolver estoque
+    # Devolver estoque (Atomicamente também)
     for item in pedido.itens:
-        if item.produto:
-            item.produto.estoque += item.quantidade
+        db.query(Produto).filter(Produto.id == item.produto_id).update(
+            {"estoque": Produto.estoque + item.quantidade},
+            synchronize_session=False
+        )
     
     pedido.status = StatusPedido.CANCELADO.value
     db.commit()
@@ -957,6 +1086,50 @@ def relatorio_vendas(
         "periodo": {"inicio": data_inicio, "fim": data_fim},
         "vendas": [{"data": str(v.data), "total": float(v.total), "quantidade": v.quantidade, "forma_pagamento": v.forma_pagamento} for v in vendas]
     }
+
+@app.get("/relatorios/exportar/csv")
+def exportar_pedidos_csv(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Gera um arquivo CSV com todos os pedidos para análise em Excel"""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+    
+    # Buscar todos os pedidos com seus itens
+    pedidos = db.query(Pedido).order_by(Pedido.created_at.desc()).all()
+    
+    # Criar arquivo em memória (StringIO)
+    output = io.StringIO()
+    
+    # --- CORREÇÃO PARA EXCEL (BOM) ---
+    # Adiciona a assinatura UTF-8 para o Excel reconhecer acentos (ç, ã, é) automaticamente
+    output.write('\ufeff')
+    
+    writer = csv.writer(output, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+    
+    # Cabeçalho do CSV
+    writer.writerow([
+        "ID", "Código", "Data Pedido", "Cliente", "Telefone", 
+        "Status", "Total (R$)", "Forma Pagto", "Itens"
+    ])
+    
+    # Linhas
+    for p in pedidos:
+        # Formatar lista de itens em uma string única
+        itens_str = " | ".join([f"{i.quantidade}x {i.produto_nome}" for i in p.itens])
+        
+        writer.writerow([
+            p.id, p.codigo, p.created_at.strftime("%d/%m/%Y %H:%M"), 
+            p.cliente_nome, p.cliente_telefone, 
+            p.status, f"{p.total:.2f}".replace('.', ','), 
+            p.forma_pagamento, itens_str
+        ])
+    
+    output.seek(0)
+    
+    filename = f"relatorio_pedidos_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 # Servir arquivos estáticos (Frontend) - DEVE SER O ÚLTIMO
 app.mount("/", StaticFiles(directory=".", html=True), name="static")

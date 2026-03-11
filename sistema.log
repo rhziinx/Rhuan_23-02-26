@@ -1,0 +1,5 @@
+2026-03-10 20:23:47,479 - WARNING - IP 127.0.0.1 bloqueado por 15 min após 5 falhas de login.
+2026-03-10 20:23:51,402 - WARNING - Login bloqueado para IP 127.0.0.1. Tentativas excessivas.
+2026-03-10 20:33:24,907 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-10 20:48:46,484 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-10 20:56:00,042 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
