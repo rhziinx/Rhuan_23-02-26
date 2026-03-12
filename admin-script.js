@@ -1,4 +1,5 @@
 const API_URL = window.location.protocol === 'file:' ? 'http://localhost:8000' : window.location.origin;
+const WS_URL = API_URL.replace('http', 'ws') + '/ws/pedidos'; // URL WebSocket automática
 
 class AdminPanel {
     constructor() {
@@ -6,6 +7,7 @@ class AdminPanel {
         this.currentSection = 'dashboard';
         this.charts = {};
         this.isLive = false;
+        this.socket = null; // Conexão WebSocket
         this.liveInterval = null;
         
         this.init();
@@ -20,8 +22,9 @@ class AdminPanel {
         this.bindEvents();
         this.loadUser();
         this.showSection('dashboard');
-        this.loadChartJS(); // Iniciar carregamento dos gráficos
+        this.checkChartJS(); // Verificar carregamento dos gráficos
         this.loadConfig(); // Carregar tema e configurações ao iniciar
+        this.initWebSocket(); // Iniciar conexão Real-Time 🚀
         this.startAutoRefresh();
     }
     
@@ -46,16 +49,55 @@ class AdminPanel {
     }
 
     // --- CARREGAMENTO SEGURO DO CHART.JS ---
-    loadChartJS() {
-        if (typeof Chart !== 'undefined') return; // Já carregado via HTML
-        
-        const script = document.createElement('script');
-        script.src = "https://cdn.jsdelivr.net/npm/chart.js";
-        script.onload = () => this.refreshData(); // Recarrega dados quando terminar de baixar
-        document.head.appendChild(script);
+    checkChartJS() {
+        // Apenas aguarda o Chart.js carregar (já incluído no HTML)
+        if (typeof Chart === 'undefined') {
+            setTimeout(() => this.checkChartJS(), 200);
+        } else {
+            // Se já estiver carregado e estivermos na tela de dashboard, renderiza
+            if (this.currentSection === 'dashboard') {
+                this.refreshData();
+            }
+        }
     }
     // ---------------------------------------
     
+    // --- WEBSOCKET REAL-TIME (TURBO 🚀) ---
+    initWebSocket() {
+        console.log('Conectando ao Turbo (WebSocket)...');
+        this.socket = new WebSocket(WS_URL);
+
+        this.socket.onopen = () => {
+            console.log('⚡ Conectado ao servidor em tempo real!');
+            this.showToast('Sistema Online e Conectado ⚡', 'success');
+        };
+
+        this.socket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log('Nova atualização:', data);
+
+            if (data.type === 'novo_pedido') {
+                this.showToast(`🔔 Novo Pedido: ${data.codigo}`, 'info');
+                this.playSound('notification');
+                this.refreshData(); // Atualiza a tela na hora
+            } else if (data.type === 'update_pedido') {
+                this.refreshData(); // Atualiza Kanban se status mudar
+            }
+        };
+
+        this.socket.onclose = () => {
+            console.warn('Conexão perdida. Tentando reconectar em 5s...');
+            setTimeout(() => this.initWebSocket(), 5000);
+        };
+    }
+
+    playSound(type) {
+        // Tenta tocar um som simples de alerta (pode ser bloqueado pelo navegador sem interação)
+        // Usando um beep simples via AudioContext seria ideal, mas aqui apenas simulamos ou usamos um arquivo se existir
+        // Para este contexto, focaremos apenas na atualização visual instantânea.
+    }
+    // ---------------------------------------
+
     async loadUser() {
         try {
             const response = await fetch(`${API_URL}/usuarios/me`, {
@@ -94,6 +136,9 @@ class AdminPanel {
                 break;
             case 'produtos':
                 this.loadProdutos();
+                break;
+            case 'cupons':
+                this.loadCupons();
                 break;
             case 'config':
                 this.loadConfig();
@@ -135,14 +180,14 @@ class AdminPanel {
         const ctx = document.getElementById('vendasChart');
         if (!ctx) return;
 
-        // Proteção: Se o Chart.js ainda não carregou, tenta de novo em 500ms
+        // Proteção: Se o Chart.js ainda não carregou, aguarda
         if (typeof Chart === 'undefined') {
-            setTimeout(() => this.renderChart(vendasData), 500);
             return;
         }
         
         if (this.charts.vendas) {
             this.charts.vendas.destroy();
+            this.charts.vendas = null;
         }
         
         const labels = vendasData.map(v => {
@@ -194,14 +239,14 @@ class AdminPanel {
         const ctx = document.getElementById('topProdutosChart');
         if (!ctx) return;
 
-        // Proteção: Se o Chart.js ainda não carregou, tenta de novo em 500ms
+        // Proteção: Se o Chart.js ainda não carregou, aguarda
         if (typeof Chart === 'undefined') {
-            setTimeout(() => this.renderTopProductsChart(produtosData), 500);
             return;
         }
 
         if (this.charts.topProdutos) {
             this.charts.topProdutos.destroy();
+            this.charts.topProdutos = null;
         }
 
         const labels = produtosData.map(p => p.nome);
@@ -321,14 +366,21 @@ class AdminPanel {
     }
     
     getKanbanButton(pedido) {
+        // Botão de Impressão sempre visível
+        const btnPrint = `
+            <button class="k-btn" style="background: #252529; color: #a1a1aa; border: 1px solid #3f3f46; margin-right: 5px;" onclick="admin.printOrder(${pedido.id})" title="Imprimir Comprovante">
+                🖨️
+            </button>
+        `;
+        
         if (pedido.status === 'agendado') {
-            return `<button class="k-btn next" onclick="admin.updateStatus(${pedido.id}, 'preparando')">Iniciar Preparo ➜</button>`;
+            return `${btnPrint}<button class="k-btn next" onclick="admin.updateStatus(${pedido.id}, 'preparando')">Iniciar Preparo ➜</button>`;
         } else if (pedido.status === 'preparando') {
-            return `<button class="k-btn next" style="background: #f59e0b; color: black;" onclick="admin.updateStatus(${pedido.id}, 'pronto')">Marcar Pronto ➜</button>`;
+            return `${btnPrint}<button class="k-btn next" style="background: #f59e0b; color: black;" onclick="admin.updateStatus(${pedido.id}, 'pronto')">Marcar Pronto ➜</button>`;
         } else if (pedido.status === 'pronto') {
-            return `<button class="k-btn next" style="background: #10b981;" onclick="admin.updateStatus(${pedido.id}, 'entregue')">Entregar (Finalizar) ✓</button>`;
+            return `${btnPrint}<button class="k-btn next" style="background: #10b981;" onclick="admin.updateStatus(${pedido.id}, 'entregue')">Entregar (Finalizar) ✓</button>`;
         }
-        return '';
+        return btnPrint;
     }
     
     async updateStatus(pedidoId, status) {
@@ -469,6 +521,80 @@ class AdminPanel {
         }
     }
     
+    // --- LÓGICA DE CUPONS ---
+    async loadCupons() {
+        try {
+            const response = await fetch(`${API_URL}/cupons`, {
+                headers: { 'Authorization': `Bearer ${this.token}` }
+            });
+            const cupons = await response.json();
+            const tbody = document.getElementById('cuponsTable');
+            
+            if (cupons.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 2rem;">Nenhum cupom criado</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = cupons.map(c => `
+                <tr>
+                    <td><strong style="color: #FFD700; font-family: monospace; font-size: 1.1em;">${c.codigo}</strong></td>
+                    <td>${c.tipo_desconto === 'percentual' ? c.valor_desconto + '%' : 'R$ ' + c.valor_desconto.toFixed(2)}</td>
+                    <td>${c.descricao || '-'}</td>
+                    <td>${c.ativo ? '<span style="color:#10b981">Ativo</span>' : '<span style="color:#ef4444">Inativo</span>'}</td>
+                    <td>
+                        <button class="btn-secondary" onclick="admin.deleteCupom(${c.id})" style="color: #ef4444; border-color: #ef4444;">Excluir</button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch (error) {
+            this.showToast('Erro ao carregar cupons', 'error');
+        }
+    }
+
+    openCupomModal() {
+        document.getElementById('cupomForm').reset();
+        document.getElementById('cupomModal').classList.add('open');
+    }
+
+    closeCupomModal() {
+        document.getElementById('cupomModal').classList.remove('open');
+    }
+
+    async saveCupom(event) {
+        event.preventDefault();
+        const cupom = {
+            codigo: document.getElementById('cupomCodigo').value,
+            tipo_desconto: document.getElementById('cupomTipo').value,
+            valor_desconto: parseFloat(document.getElementById('cupomValor').value)
+        };
+
+        try {
+            const response = await fetch(`${API_URL}/cupons`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(cupom)
+            });
+            if (!response.ok) throw new Error('Erro ao criar cupom (verifique se já existe)');
+            
+            this.showToast('Cupom criado!', 'success');
+            this.closeCupomModal();
+            this.loadCupons();
+        } catch (e) { this.showToast(e.message, 'error'); }
+    }
+
+    async deleteCupom(id) {
+        if (!confirm('Tem certeza que deseja apagar este cupom?')) return;
+        try {
+            await fetch(`${API_URL}/cupons/${id}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${this.token}` }
+            });
+            this.loadCupons();
+            this.showToast('Cupom removido', 'success');
+        } catch (e) { this.showToast('Erro ao remover', 'error'); }
+    }
+    // ------------------------
+
     async loadConfig() {
         try {
             const response = await fetch(`${API_URL}/config`, {
@@ -580,7 +706,13 @@ class AdminPanel {
             const total = data.vendas.reduce((sum, v) => sum + v.total, 0);
             
             container.innerHTML = `
-                <h4 style="margin-bottom: 1rem;">Resumo do Período</h4>
+                <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 1rem;">
+                    <h4 style="margin: 0;">Resultado do Relatório</h4>
+                    <button class="btn-primary" onclick="admin.exportarCSV()" style="background-color: #10b981; border: none;">
+                        <span style="margin-right: 5px;">📥</span> Baixar Planilha (Excel)
+                    </button>
+                </div>
+
                 <div class="stats-grid" style="margin-bottom: 2rem;">
                     <div class="stat-card primary">
                         <div class="stat-info">
@@ -623,6 +755,51 @@ class AdminPanel {
         }
     }
     
+    async exportarCSV() {
+        const inicio = document.getElementById('relDataInicio').value;
+        const fim = document.getElementById('relDataFim').value;
+        
+        let url = `${API_URL}/relatorios/exportar/csv`;
+        let params = [];
+        
+        if (inicio) params.push(`data_inicio=${inicio}T00:00:00`);
+        if (fim) params.push(`data_fim=${fim}T23:59:59`);
+        
+        if (params.length > 0) {
+            url += '?' + params.join('&');
+        }
+        
+        this.showToast('Gerando arquivo, aguarde...', 'info');
+        
+        try {
+            const response = await fetch(url, {
+                headers: { 'Authorization': `Bearer ${this.token}` }
+            });
+            
+            if (!response.ok) throw new Error('Erro ao baixar relatório');
+            
+            // Converter resposta para Blob (arquivo)
+            const blob = await response.blob();
+            const downloadUrl = window.URL.createObjectURL(blob);
+            
+            // Criar link invisível e clicar nele para baixar
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = `relatorio_vendas_${new Date().toISOString().slice(0,10)}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            
+            // Limpeza
+            window.URL.revokeObjectURL(downloadUrl);
+            document.body.removeChild(a);
+            this.showToast('Download concluído!', 'success');
+            
+        } catch (error) {
+            console.error(error);
+            this.showToast('Erro ao exportar arquivo', 'error');
+        }
+    }
+    
     refreshData() {
         if (this.currentSection === 'dashboard') {
             this.loadDashboard();
@@ -632,16 +809,18 @@ class AdminPanel {
     }
     
     startAutoRefresh() {
-        // Atualizar a cada 10 segundos para o Kanban ficar "vivo"
+        // Agora com WebSockets, usamos isso apenas como fallback (backup) a cada 60s
         setInterval(() => {
             if (document.visibilityState === 'visible') {
                 this.refreshData();
             }
-        }, 10000);
+        }, 60000); 
     }
     
     printOrder(pedidoId) {
         window.open(`${API_URL}/pedidos/${pedidoId}/comprovante`, '_blank');
+        // Abre uma janelinha popup pronta para impressão
+        window.open(`${API_URL}/pedidos/${pedidoId}/comprovante`, 'print_window', 'width=400,height=600');
     }
     
     logout() {

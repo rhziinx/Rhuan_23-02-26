@@ -310,6 +310,12 @@
                             <label>Data Fim</label>
                             <input type="date" id="relDataFim">
                         </div>
+                        <button class="btn-secondary" onclick="admin.exportarCSV()" style="align-self: flex-end; border-color: #10b981; color: #10b981; display: flex; align-items: center;">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            Baixar Excel
+                        </button>
                         <button class="btn-primary" onclick="admin.gerarRelatorio()" style="align-self: flex-end;">
                             Gerar Relatório
                         </button>

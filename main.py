@@ -1,20 +1,24 @@
 from typing import Optional, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import Response, FileResponse, StreamingResponse
+from fastapi.responses import Response, FileResponse, StreamingResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, text
-from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
-from sqlalchemy.sql import func
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey, text, select, update, func
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import declarative_base, relationship, selectinload
 from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import secrets
 import os
+import time
 from enum import Enum
 import uuid
 import logging
@@ -23,22 +27,19 @@ import csv
 import io
 
 # --- CONFIGURAÇÃO DE LOGGING PROFISSIONAL ---
-# Cria um logger que escreve tanto no console quanto em arquivo
 logger = logging.getLogger("cantina_api")
 logger.setLevel(logging.INFO)
 
-# 1. Handler de Arquivo (Rotativo: Max 5MB, guarda os últimos 3 arquivos)
 file_handler = RotatingFileHandler("sistema.log", maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
-# 2. Handler de Console (Para ver na janela preta)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
 logger.addHandler(console_handler)
 
-# Dicionário em memória para Rate Limiting de Login (IP -> {tentativas, bloqueado_ate})
-login_attempts = {}
+# --- RATE LIMITING (SEGURANÇA SAAS) ---
+limiter = Limiter(key_func=get_remote_address)
 
 # Configurações de segurança
 SECRET_KEY = os.getenv("SECRET_KEY", "SUA_CHAVE_SECRETA_FIXA_PARA_DEV_NAO_USE_RANDOM_EM_PROD")
@@ -49,19 +50,24 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 horas
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 security = HTTPBearer()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./cantina_v3.db")
+# --- DATABASE ASYNC (PREPARADO PARA POSTGRESQL) ---
+# Mantemos a lógica híbrida: SQLite local (escola) e preparado para Postgres (futuro)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./cantina_v3.db")
+
 IS_PRODUCTION = os.getenv("ENV") == "production"
 
-engine = create_engine(
+engine = create_async_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False, "timeout": 15} if "sqlite" in DATABASE_URL else {},
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
     pool_pre_ping=True,
     echo=False
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Sessão Assíncrona Factory
+AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-# Enums
+# --- ENUMS ---
 class StatusPedido(str, Enum):
     AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
     AGENDADO = "agendado"
@@ -85,7 +91,7 @@ class CategoriaProduto(str, Enum):
     SALGADOS = "Salgados"
     OUTROS = "Outros"
 
-# Modelos SQLAlchemy
+# --- TABELAS (MODELS) ---
 class Usuario(Base):
     __tablename__ = "usuarios"
     
@@ -112,14 +118,14 @@ class Produto(Base):
     nome = Column(String(100), nullable=False, index=True)
     descricao = Column(Text, nullable=True)
     preco = Column(Float, nullable=False)
-    preco_custo = Column(Float, default=0.0)  # Para relatórios de lucro
+    preco_custo = Column(Float, default=0.0)
     categoria = Column(String(50), default=CategoriaProduto.LANCHES.value)
     imagem_url = Column(String(500), default="https://via.placeholder.com/400x300?text=Produto")
     estoque = Column(Integer, default=0)
-    estoque_minimo = Column(Integer, default=5)  # Alerta de estoque baixo
+    estoque_minimo = Column(Integer, default=5)
     ativo = Column(Boolean, default=True)
-    destaque = Column(Boolean, default=False)  # Produtos em destaque
-    tempo_preparo = Column(Integer, default=10)  # Minutos
+    destaque = Column(Boolean, default=False)
+    tempo_preparo = Column(Integer, default=10)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
@@ -130,9 +136,9 @@ class Pedido(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     uuid = Column(String(36), unique=True, index=True, default=lambda: str(uuid.uuid4()))
-    codigo = Column(String(20), unique=True, index=True)  # Código amigável (ex: PED-001234)
+    codigo = Column(String(20), unique=True, index=True)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
-    cliente_nome = Column(String(100), nullable=True)  # Para pedidos sem cadastro
+    cliente_nome = Column(String(100), nullable=True)
     cliente_telefone = Column(String(20), nullable=True)
     status = Column(String(50), default=StatusPedido.AGUARDANDO_PAGAMENTO.value)
     data_retirada = Column(DateTime, nullable=False)
@@ -141,7 +147,7 @@ class Pedido(Base):
     desconto = Column(Float, default=0.0)
     taxa_entrega = Column(Float, default=0.0)
     observacoes = Column(Text, nullable=True)
-    mesa = Column(String(10), nullable=True)  # Para restaurantes com mesas
+    mesa = Column(String(10), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     pago_at = Column(DateTime, nullable=True)
@@ -157,8 +163,8 @@ class ItemPedido(Base):
     pedido_id = Column(Integer, ForeignKey("pedidos.id"))
     produto_id = Column(Integer, ForeignKey("produtos.id"))
     quantidade = Column(Integer, nullable=False)
-    preco_unitario = Column(Float, nullable=False)  # Preço no momento da compra
-    observacao = Column(String(255), nullable=True)  # "Sem cebola", etc
+    preco_unitario = Column(Float, nullable=False)
+    observacao = Column(String(255), nullable=True)
     
     pedido = relationship("Pedido", back_populates="itens")
     produto = relationship("Produto", back_populates="itens_pedido")
@@ -194,10 +200,10 @@ class Cupom(Base):
     id = Column(Integer, primary_key=True, index=True)
     codigo = Column(String(50), unique=True, index=True, nullable=False)
     descricao = Column(String(255))
-    tipo_desconto = Column(String(20), default="percentual") # ou 'fixo'
+    tipo_desconto = Column(String(20), default="percentual")
     valor_desconto = Column(Float, nullable=False)
     ativo = Column(Boolean, default=True)
-    usos_maximos = Column(Integer, default=0) # 0 para infinito
+    usos_maximos = Column(Integer, default=0)
 
 class UsuarioResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -297,9 +303,6 @@ class LoginRequest(BaseModel):
     usuario: str
     senha: str
 
-class RecoveryRequest(BaseModel):
-    email: str
-
 class ConfigUpdate(BaseModel):
     chave: str
     valor: str
@@ -340,85 +343,100 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
+# --- WEBSOCKET MANAGER (REAL-TIME) ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        # Envia mensagem para todos os admins conectados
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                # Se falhar enviar, removemos a conexão morta
+                self.disconnect(connection)
+
+manager = ConnectionManager()
+
+# --- MIDDLEWARE DE PERFORMANCE (SAAS MONITORING) ---
+# Mede o tempo exato de processamento de cada requisição.
+# Essencial para saber se o servidor está lento.
+async def performance_middleware(request: Request, call_next):
+    start_time = time.perf_counter()
+    response = await call_next(request)
+    process_time = time.perf_counter() - start_time
+    # Adiciona header com o tempo de resposta (bom para debug)
+    response.headers["X-Process-Time"] = str(process_time)
+    # Loga se for lento (> 0.5s)
+    if process_time > 0.5:
+        logger.warning(f"Lentidão detectada: {request.method} {request.url.path} demorou {process_time:.4f}s")
+    return response
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Garantir que as tabelas existam
-    Base.metadata.create_all(bind=engine)
-    
-    # --- OTIMIZAÇÃO DE PERFORMANCE (WAL MODE) ---
-    if "sqlite" in DATABASE_URL:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("PRAGMA journal_mode=WAL;"))
-                conn.execute(text("PRAGMA synchronous=NORMAL;"))
-                logger.info("SQLite WAL Mode ativado (Melhor performance de concorrência)")
-        except Exception as e:
-            logger.warning(f"Não foi possível ativar WAL mode: {e}")
+    # --- MIGRATIONS E SETUP INICIAL ---
+    async with engine.begin() as conn:
+        # Cria tabelas se não existirem
+        await conn.run_sync(Base.metadata.create_all)
+        
+        # Otimização WAL para SQLite
+        if "sqlite" in DATABASE_URL:
+            await conn.execute(text("PRAGMA journal_mode=WAL;"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL;"))
+            logger.info("SQLite WAL Mode ativado (Melhor performance de concorrência)")
 
-    # --- CORRECAO AUTOMATICA DE BANCO DE DADOS (MIGRATION) ---
-    try:
-        with engine.connect() as conn:
-            # Verificar colunas faltantes na tabela pedidos
-            result = conn.execute(text("PRAGMA table_info(pedidos)"))
-            existing_columns = {row.name for row in result.fetchall()}
+    async with AsyncSessionLocal() as db:
+        try:
+            # Verifica Admin
+            result = await db.execute(select(Usuario).where(Usuario.usuario == "admin"))
+            admin = result.scalars().first()
             
-            missing_cols = [
-                ("data_retirada", "DATETIME"),
-                ("forma_pagamento", "VARCHAR(50)"),
-                ("desconto", "FLOAT DEFAULT 0"),
-                ("taxa_entrega", "FLOAT DEFAULT 0"),
-                ("mesa", "VARCHAR(10)"),
-                ("pago_at", "DATETIME"),
-                ("entregue_at", "DATETIME")
+            if not admin:
+                admin = Usuario(
+                    usuario="admin",
+                    senha_hash=get_password_hash("admin123"),
+                    nome="Administrador",
+                    email="admin@cantina.com",
+                    is_admin=True,
+                    is_ativo=True
+                )
+                db.add(admin)
+                await db.commit()
+                logger.info("Usuário admin criado: admin / admin123")
+            
+            # Configurações padrão
+            configs_padrao = [
+                ("nome_empresa", "Cantina Digital", "Nome da empresa exibido no sistema"),
+                ("telefone", "", "Telefone para contato"),
+                ("endereco", "", "Endereço da cantina"),
+                ("horario_funcionamento", "07:00-18:00", "Horário de funcionamento"),
+                ("tempo_medio_preparo", "15", "Tempo médio de preparo em minutos"),
+                ("chave_pix", "", "Chave PIX para recebimentos"),
+                ("taxa_entrega", "0", "Taxa de entrega padrão"),
+                ("logo_url", "", "URL do logotipo da empresa"),
+                ("cor_tema", "#E10600", "Cor principal do tema (hex)"),
             ]
             
-            for col_name, col_type in missing_cols:
-                if col_name not in existing_columns:
-                    logger.info(f"Migrando: Adicionando coluna '{col_name}' na tabela 'pedidos'")
-                    conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN {col_name} {col_type}"))
+            for chave, valor, descricao in configs_padrao:
+                res = await db.execute(select(Configuracao).where(Configuracao.chave == chave))
+                if not res.scalars().first():
+                    db.add(Configuracao(chave=chave, valor=valor, descricao=descricao))
             
-            conn.commit()
-    except Exception as e:
-        logger.error(f"Erro na migracao automatica: {e}")
-    # ---------------------------------------------------------
-
-    db = SessionLocal()
-    try:
-        # Criar usuário admin padrão se não existir
-        admin = db.query(Usuario).filter(Usuario.usuario == "admin").first()
-        if not admin:
-            admin = Usuario(
-                usuario="admin",
-                senha_hash=get_password_hash("admin123"),
-                nome="Administrador",
-                email="admin@cantina.com",
-                is_admin=True,
-                is_ativo=True
-            )
-            db.add(admin)
-            db.commit()
-            logger.info("Usuário admin criado: admin / admin123")
-        
-        # Configurações padrão
-        configs_padrao = [
-            ("nome_empresa", "Cantina Digital", "Nome da empresa exibido no sistema"),
-            ("telefone", "", "Telefone para contato"),
-            ("endereco", "", "Endereço da cantina"),
-            ("horario_funcionamento", "07:00-18:00", "Horário de funcionamento"),
-            ("tempo_medio_preparo", "15", "Tempo médio de preparo em minutos"),
-            ("chave_pix", "", "Chave PIX para recebimentos"),
-            ("taxa_entrega", "0", "Taxa de entrega padrão"),
-            ("logo_url", "", "URL do logotipo da empresa"),
-            ("cor_tema", "#E10600", "Cor principal do tema (hex)"),
-        ]
-        
-        for chave, valor, descricao in configs_padrao:
-            if not db.query(Configuracao).filter(Configuracao.chave == chave).first():
-                db.add(Configuracao(chave=chave, valor=valor, descricao=descricao))
-        
-        # Criar um produto de teste se não houver nenhum
-        if db.query(Produto).count() == 0:
-            produtos_senna = [
+            # Produtos de teste
+            res_prod = await db.execute(select(func.count(Produto.id)))
+            count = res_prod.scalar()
+            
+            if count == 0:
+                produtos_senna = [
                 {
                     "nome": "Combo Pole Position",
                     "descricao": "Hambúrguer duplo artesanal, cheddar inglês, bacon crocante e maionese da casa. Acompanha batatas rústicas.",
@@ -460,23 +478,28 @@ async def lifespan(app: FastAPI):
                     "tempo_preparo": 0
                 }
             ]
-            for p in produtos_senna:
-                db.add(Produto(**p))
-            logger.info("Produtos temáticos Senna criados")
-
-        db.commit()
-    finally:
-        db.close()
+                for p in produtos_senna:
+                    db.add(Produto(**p))
+                await db.commit()
+                logger.info("Produtos temáticos criados")
+        except Exception as e:
+            logger.error(f"Erro na inicialização: {e}")
     yield
 
 # FastAPI App
 app = FastAPI(
     title="Cantina Enterprise API",
     description="API profissional para gestão de cantinas e restaurantes",
-    version="2.0.0",
+    version="2.0.1 Stable",
     docs_url="/docs" if os.getenv("ENV") != "production" else None,
     lifespan=lifespan
 )
+
+app.middleware("http")(performance_middleware)
+
+# Configurar Rate Limiter no App
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS configurado para produção
 if IS_PRODUCTION:
@@ -502,14 +525,11 @@ async def favicon():
     return Response(status_code=204)
 
 # Dependency
-def get_db():
-    db = SessionLocal()
-    try:
+async def get_db():
+    async with AsyncSessionLocal() as db:
         yield db
-    finally:
-        db.close()
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: AsyncSession = Depends(get_db)):
     token = credentials.credentials
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -519,96 +539,87 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
     
-    usuario = db.query(Usuario).filter(Usuario.usuario == usuario_id).first()
+    result = await db.execute(select(Usuario).where(Usuario.usuario == usuario_id))
+    usuario = result.scalars().first()
+    
     if usuario is None or not usuario.is_ativo:
         raise HTTPException(status_code=401, detail="Usuário não encontrado ou inativo")
     return usuario
 
 @app.get("/health")
-def health_check(db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def health_check(request: Request, db: AsyncSession = Depends(get_db)):
     """Rota para monitoramento verificar se a API e o Banco estão vivos"""
     try:
-        # Tenta fazer uma query simples (SELECT 1)
-        db.execute(text("SELECT 1"))
+        await db.execute(text("SELECT 1"))
         return {"status": "ok", "database": "connected", "timestamp": datetime.now(timezone.utc)}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database connection failed: {str(e)}")
 
+# --- WEBSOCKET ENDPOINT ---
+@app.websocket("/ws/pedidos")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Mantém a conexão viva e aguarda comandos (ping/pong)
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
 @app.get("/config/public")
-def get_public_config(db: Session = Depends(get_db)):
+@limiter.limit("20/minute")
+async def get_public_config(request: Request, db: AsyncSession = Depends(get_db)):
     """Retorna configurações públicas para o frontend"""
     chaves = ["nome_empresa", "chave_pix", "telefone", "logo_url", "cor_tema"]
-    configs = db.query(Configuracao).filter(Configuracao.chave.in_(chaves)).all()
+    result = await db.execute(select(Configuracao).where(Configuracao.chave.in_(chaves)))
+    configs = result.scalars().all()
     return {c.chave: c.valor for c in configs}
 
 @app.get("/config", response_model=List[ConfiguracaoResponse])
-def get_all_configs(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def get_all_configs(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
-    return db.query(Configuracao).all()
+    result = await db.execute(select(Configuracao))
+    return result.scalars().all()
 
 @app.put("/config")
-def update_configs(configs: List[ConfigUpdate], db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def update_configs(configs: List[ConfigUpdate], db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
     for config_item in configs:
-        db.query(Configuracao).filter(Configuracao.chave == config_item.chave).update(
-            {"valor": config_item.valor}, synchronize_session=False
+        await db.execute(
+            update(Configuracao).where(Configuracao.chave == config_item.chave).values(valor=config_item.valor)
         )
     
-    db.commit()
-    log_acao(db, "ATUALIZAR_CONFIG", current_user.id, "Configurações do sistema atualizadas")
+    await db.commit()
+    await log_acao(db, "ATUALIZAR_CONFIG", current_user.id, "Configurações do sistema atualizadas")
     return {"msg": "Configurações salvas com sucesso"}
 
 
-def gerar_codigo_pedido(db: Session) -> str:
+async def gerar_codigo_pedido(db: AsyncSession) -> str:
     """Gera código único para pedido (PED-001234)"""
-    ultimo = db.query(Pedido).order_by(Pedido.id.desc()).first()
+    result = await db.execute(select(Pedido).order_by(Pedido.id.desc()).limit(1))
+    ultimo = result.scalars().first()
     numero = 1 if not ultimo else ultimo.id + 1
     return f"PED-{numero:06d}"
 
-def log_acao(db: Session, acao: str, usuario_id: Optional[int] = None, detalhes: Optional[str] = None, ip: Optional[str] = None):
+async def log_acao(db: AsyncSession, acao: str, usuario_id: Optional[int] = None, detalhes: Optional[str] = None, ip: Optional[str] = None):
     """Registra ação no log do sistema"""
     log = LogSistema(usuario_id=usuario_id, acao=acao, detalhes=detalhes, ip_address=ip)
     db.add(log)
-    db.commit()
+    await db.commit()
 
 # Endpoints de Autenticação
 @app.post("/auth/login", response_model=TokenResponse)
-def login(login_data: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    # --- RATE LIMITING (SEGURANÇA) ---
-    client_ip = request.client.host
-    now = datetime.now()
+@limiter.limit("5/minute") # Rate Limit automático pelo SlowAPI
+async def login(login_data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     
-    # Verificar se o IP está bloqueado
-    if client_ip in login_attempts:
-        attempt = login_attempts[client_ip]
-        if attempt["blocked_until"] and now < attempt["blocked_until"]:
-            tempo_restante = (attempt["blocked_until"] - now).seconds
-            logger.warning(f"Login bloqueado para IP {client_ip}. Tentativas excessivas.")
-            raise HTTPException(
-                status_code=429, 
-                detail=f"Muitas tentativas falhas. Tente novamente em {tempo_restante} segundos."
-            )
-        # Se o tempo de bloqueio passou, reseta
-        if attempt["blocked_until"] and now >= attempt["blocked_until"]:
-            login_attempts[client_ip] = {"count": 0, "blocked_until": None}
-
-    usuario = db.query(Usuario).filter(Usuario.usuario == login_data.usuario).first()
+    result = await db.execute(select(Usuario).where(Usuario.usuario == login_data.usuario))
+    usuario = result.scalars().first()
     
     if not usuario or not verify_password(login_data.senha, usuario.senha_hash):
-        # Registrar falha
-        if client_ip not in login_attempts:
-            login_attempts[client_ip] = {"count": 0, "blocked_until": None}
-        
-        login_attempts[client_ip]["count"] += 1
-        
-        # Se errou 5 vezes, bloqueia por 15 minutos
-        if login_attempts[client_ip]["count"] >= 5:
-            login_attempts[client_ip]["blocked_until"] = now + timedelta(minutes=15)
-            logger.warning(f"IP {client_ip} bloqueado por 15 min após 5 falhas de login.")
-            
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
     
     if not usuario.is_ativo:
@@ -620,12 +631,8 @@ def login(login_data: LoginRequest, request: Request, db: Session = Depends(get_
         expires_delta=access_token_expires
     )
     
-    # Sucesso: Limpar tentativas do IP
-    if client_ip in login_attempts:
-        del login_attempts[client_ip]
-    
     usuario.ultimo_acesso = datetime.now(timezone.utc)
-    db.commit()
+    await db.commit()
     
     return {
         "access_token": access_token,
@@ -635,7 +642,7 @@ def login(login_data: LoginRequest, request: Request, db: Session = Depends(get_
     }
 
 @app.post("/auth/refresh")
-def refresh_token(current_user: Usuario = Depends(get_current_user)):
+async def refresh_token(current_user: Usuario = Depends(get_current_user)):
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": current_user.usuario, "id": current_user.id, "is_admin": current_user.is_admin},
@@ -644,21 +651,22 @@ def refresh_token(current_user: Usuario = Depends(get_current_user)):
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/auth/recuperar-senha")
-def recuperar_senha(request: RecoveryRequest, db: Session = Depends(get_db)):
-    # Em um sistema real, aqui enviaríamos um e-mail.
-    # Por enquanto, vamos apenas simular e logar.
-    user = db.query(Usuario).filter(Usuario.email == request.email).first()
+@limiter.limit("3/hour")
+async def recuperar_senha(request: Request, recovery: RecoveryRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Usuario).where(Usuario.email == recovery.email))
+    user = result.scalars().first()
     if user:
         logger.info(f"Solicitação de recuperação de senha para: {user.email}")
     return {"msg": "Se o e-mail estiver cadastrado, você receberá as instruções."}
 
 # Endpoints de Usuários
 @app.post("/usuarios", response_model=UsuarioResponse)
-def criar_usuario(usuario: UsuarioCreate, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def criar_usuario(usuario: UsuarioCreate, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    if db.query(Usuario).filter(Usuario.usuario == usuario.usuario).first():
+    res = await db.execute(select(Usuario).where(Usuario.usuario == usuario.usuario))
+    if res.scalars().first():
         raise HTTPException(status_code=400, detail="Usuário já existe")
     
     db_usuario = Usuario(
@@ -669,49 +677,51 @@ def criar_usuario(usuario: UsuarioCreate, db: Session = Depends(get_db), current
         is_admin=usuario.is_admin
     )
     db.add(db_usuario)
-    db.commit()
-    db.refresh(db_usuario)
+    await db.commit()
+    await db.refresh(db_usuario)
     
-    log_acao(db, "CRIAR_USUARIO", current_user.id, f"Usuário {usuario.usuario} criado")
+    await log_acao(db, "CRIAR_USUARIO", current_user.id, f"Usuário {usuario.usuario} criado")
     return db_usuario
 
 @app.get("/usuarios/me", response_model=UsuarioResponse)
-def get_me(current_user: Usuario = Depends(get_current_user)):
+async def get_me(current_user: Usuario = Depends(get_current_user)):
     return current_user
 
 # Endpoints de Produtos
 @app.get("/produtos", response_model=List[ProdutoResponse])
-def listar_produtos(
+async def listar_produtos(
     categoria: Optional[str] = None,
     ativos: Optional[bool] = None,
     destaque: Optional[bool] = None,
     busca: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
-    query = db.query(Produto)
+    query = select(Produto)
     
     if ativos is not None:
-        query = query.filter(Produto.ativo == ativos)
+        query = query.where(Produto.ativo == ativos)
     if categoria:
-        query = query.filter(Produto.categoria == categoria)
+        query = query.where(Produto.categoria == categoria)
     if destaque is not None: 
-        query = query.filter(Produto.destaque == destaque)
+        query = query.where(Produto.destaque == destaque)
     if busca:
-        query = query.filter(Produto.nome.ilike(f"%{busca}%"))
+        query = query.where(Produto.nome.ilike(f"%{busca}%"))
     
-    return query.order_by(Produto.nome).all()
+    result = await db.execute(query.order_by(Produto.nome))
+    return result.scalars().all()
 
 @app.get("/produtos/{produto_id}", response_model=ProdutoResponse)
-def obter_produto(produto_id: int, db: Session = Depends(get_db)):
-    produto = db.query(Produto).filter(Produto.id == produto_id).first()
+async def obter_produto(produto_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Produto).where(Produto.id == produto_id))
+    produto = result.scalars().first()
     if not produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     return produto
 
 @app.post("/produtos", response_model=ProdutoResponse)
-def criar_produto(
+async def criar_produto(
     produto: ProdutoCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
     if not current_user.is_admin:
@@ -719,23 +729,24 @@ def criar_produto(
     
     db_produto = Produto(**produto.model_dump())
     db.add(db_produto)
-    db.commit()
-    db.refresh(db_produto)
+    await db.commit()
+    await db.refresh(db_produto)
     
-    log_acao(db, "CRIAR_PRODUTO", current_user.id, f"Produto {produto.nome} criado")
+    await log_acao(db, "CRIAR_PRODUTO", current_user.id, f"Produto {produto.nome} criado")
     return db_produto
 
 @app.put("/produtos/{produto_id}", response_model=ProdutoResponse)
-def atualizar_produto(
+async def atualizar_produto(
     produto_id: int,
     produto: ProdutoUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    db_produto = db.query(Produto).filter(Produto.id == produto_id).first()
+    result = await db.execute(select(Produto).where(Produto.id == produto_id))
+    db_produto = result.scalars().first()
     if not db_produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     
@@ -743,35 +754,36 @@ def atualizar_produto(
     for field, value in update_data.items():
         setattr(db_produto, field, value)
     
-    db.commit()
-    db.refresh(db_produto)
+    await db.commit()
+    await db.refresh(db_produto)
     
-    log_acao(db, "ATUALIZAR_PRODUTO", current_user.id, f"Produto {produto_id} atualizado")
+    await log_acao(db, "ATUALIZAR_PRODUTO", current_user.id, f"Produto {produto_id} atualizado")
     return db_produto
 
 @app.delete("/produtos/{produto_id}")
-def deletar_produto(
+async def deletar_produto(
     produto_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    db_produto = db.query(Produto).filter(Produto.id == produto_id).first()
+    result = await db.execute(select(Produto).where(Produto.id == produto_id))
+    db_produto = result.scalars().first()
     if not db_produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     
     # Soft delete - apenas desativa
     db_produto.ativo = False
-    db.commit()
+    await db.commit()
     
-    log_acao(db, "DESATIVAR_PRODUTO", current_user.id, f"Produto {produto_id} desativado")
+    await log_acao(db, "DESATIVAR_PRODUTO", current_user.id, f"Produto {produto_id} desativado")
     return {"msg": "Produto desativado com sucesso"}
 
 # --- ROTA DE BACKUP (SEGURANÇA) ---
 @app.get("/admin/backup_db")
-def download_backup_db(current_user: Usuario = Depends(get_current_user)):
+async def download_backup_db(current_user: Usuario = Depends(get_current_user)):
     """Permite que o admin baixe uma cópia do banco de dados SQLite"""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
@@ -787,9 +799,9 @@ def download_backup_db(current_user: Usuario = Depends(get_current_user)):
 
 # --- ROTA DE RESET (PERIGO / UTILITÁRIO) ---
 @app.delete("/admin/reset_db")
-def reset_database(
+async def reset_database(
     confirmacao: bool = False,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
     """PERIGO: Apaga todos os pedidos e logs! Útil para limpar testes."""
@@ -800,56 +812,55 @@ def reset_database(
         raise HTTPException(status_code=400, detail="Para zerar, você deve marcar 'confirmacao' como true")
     
     # Limpar tabelas de movimento (Mantém Produtos e Usuários)
-    db.query(ItemPedido).delete()
-    db.query(Pedido).delete()
-    db.query(LogSistema).delete()
+    await db.execute(text("DELETE FROM itens_pedido"))
+    await db.execute(text("DELETE FROM pedidos"))
+    await db.execute(text("DELETE FROM logs_sistema"))
     
-    db.commit()
+    await db.commit()
     
-    log_acao(db, "RESET_COMPLETO", current_user.id, "Banco de dados limpo via Admin")
+    await log_acao(db, "RESET_COMPLETO", current_user.id, "Banco de dados limpo via Admin")
     return {"msg": "Sistema limpo! Todos os pedidos e históricos foram apagados."}
 
 @app.get("/produtos/estoque/baixo", response_model=List[ProdutoResponse])
-def produtos_baixo_estoque(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def produtos_baixo_estoque(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    return db.query(Produto).filter(
+    result = await db.execute(select(Produto).where(
         Produto.ativo == True,
         Produto.estoque <= Produto.estoque_minimo
-    ).all()
+    ))
+    return result.scalars().all()
 
 # Endpoints de Pedidos
 @app.post("/pedidos", response_model=PedidoResponse)
-def criar_pedido(pedido: PedidoCreate, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def criar_pedido(request: Request, pedido: PedidoCreate, db: AsyncSession = Depends(get_db)):
     # Calcular total e verificar estoque
     total = 0
     itens_para_criar = []
     
     for item in pedido.itens:
         # --- CORREÇÃO DE CONCORRÊNCIA (ATOMIC UPDATE) ---
-        # Em vez de ler e depois escrever, tentamos atualizar diretamente no banco
-        # se houver estoque suficiente. Isso evita que dois usuários comprem o último item.
-        
-        # 1. Tenta decrementar o estoque atomicamente
-        rows_affected = db.query(Produto).filter(
+        stmt = update(Produto).where(
             Produto.id == item.produto_id,
             Produto.ativo == True,
             Produto.estoque >= item.quantidade
-        ).update(
-            {"estoque": Produto.estoque - item.quantidade},
-            synchronize_session=False
-        )
+        ).values(estoque=Produto.estoque - item.quantidade)
         
-        if rows_affected == 0:
+        result_update = await db.execute(stmt)
+        
+        if result_update.rowcount == 0:
             # Se nenhuma linha foi afetada, ou o produto não existe ou não tem estoque
-            db.rollback() # Cancela tudo que foi feito até agora neste loop
+            await db.rollback() 
             raise HTTPException(
                 status_code=400, 
                 detail=f"Estoque insuficiente ou produto indisponível para o ID {item.produto_id}. Tente novamente."
             )
             
-        produto = db.query(Produto).filter(Produto.id == item.produto_id).first()
+        res_p = await db.execute(select(Produto).where(Produto.id == item.produto_id))
+        produto = res_p.scalars().first()
+        
         preco_unitario = produto.preco
         total += preco_unitario * item.quantidade
         
@@ -867,7 +878,7 @@ def criar_pedido(pedido: PedidoCreate, db: Session = Depends(get_db)):
     
     # Criar pedido
     db_pedido = Pedido(
-        codigo=gerar_codigo_pedido(db),
+        codigo=await gerar_codigo_pedido(db),
         cliente_nome=pedido.cliente_nome,
         data_retirada=pedido.data_retirada,
         cliente_telefone=pedido.cliente_telefone,
@@ -879,58 +890,130 @@ def criar_pedido(pedido: PedidoCreate, db: Session = Depends(get_db)):
         status=StatusPedido.AGUARDANDO_PAGAMENTO.value
     )
     db.add(db_pedido)
-    db.flush()  # Para obter o ID
+    await db.flush()  # Para obter o ID
     
     # Criar itens
     for item_data in itens_para_criar:
         db_item = ItemPedido(pedido_id=db_pedido.id, **item_data)
         db.add(db_item)
     
-    db.commit()
-    db.refresh(db_pedido)
+    await db.commit()
+    
+    # Recarregar com relacionamentos
+    result = await db.execute(select(Pedido).options(selectinload(Pedido.itens).selectinload(ItemPedido.produto)).where(Pedido.id == db_pedido.id))
+    db_pedido = result.scalars().first()
+    
+    # Notificar Admin via WebSocket (TURBO 🚀)
+    await manager.broadcast({"type": "novo_pedido", "pedido_id": db_pedido.id, "codigo": db_pedido.codigo})
     
     return db_pedido
 
 @app.get("/pedidos", response_model=List[PedidoResponse])
-def listar_pedidos(
+async def listar_pedidos(
     status: Optional[str] = None,
     data_inicio: Optional[datetime] = None,
     data_fim: Optional[datetime] = None,
     limit: int = 50,
     offset: int = 0,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    query = db.query(Pedido)
+    # IMPORTANTE: Carregar itens junto (Eager Loading)
+    query = select(Pedido).options(selectinload(Pedido.itens).selectinload(ItemPedido.produto))
     
     if status:
         statuses = status.split(',')
         if len(statuses) > 1:
-            query = query.filter(Pedido.status.in_(statuses))
+            query = query.where(Pedido.status.in_(statuses))
         else:
-            query = query.filter(Pedido.status == status)
+            query = query.where(Pedido.status == status)
     if data_inicio:
-        query = query.filter(Pedido.created_at >= data_inicio)
+        query = query.where(Pedido.created_at >= data_inicio)
     if data_fim:
-        query = query.filter(Pedido.created_at <= data_fim)
+        query = query.where(Pedido.created_at <= data_fim)
     
-    pedidos = query.order_by(Pedido.created_at.desc()).offset(offset).limit(limit).all()
-    return pedidos
+    result = await db.execute(query.order_by(Pedido.created_at.desc()).offset(offset).limit(limit))
+    return result.scalars().all()
 
 @app.get("/pedidos/{pedido_id}", response_model=PedidoResponse)
-def obter_pedido(pedido_id: int, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    pedido = db.query(Pedido).filter(Pedido.id == pedido_id).first()
+async def obter_pedido(pedido_id: int, db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    result = await db.execute(select(Pedido).options(selectinload(Pedido.itens).selectinload(ItemPedido.produto)).where(Pedido.id == pedido_id))
+    pedido = result.scalars().first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     return pedido
 
+# --- ROTA DE COMPROVANTE (URGENTE PARA IMPRESSÃO) ---
+@app.get("/pedidos/{pedido_id}/comprovante", response_class=HTMLResponse)
+async def imprimir_comprovante(pedido_id: int, db: AsyncSession = Depends(get_db)):
+    """Gera um HTML simples formatado para impressoras térmicas (80mm ou 58mm)"""
+    result = await db.execute(select(Pedido).options(selectinload(Pedido.itens).selectinload(ItemPedido.produto)).where(Pedido.id == pedido_id))
+    pedido = result.scalars().first()
+    
+    if not pedido:
+        return HTMLResponse("<h1>Pedido não encontrado</h1>", status_code=404)
+
+    # Buscar config para nome da empresa
+    res_conf = await db.execute(select(Configuracao).where(Configuracao.chave == "nome_empresa"))
+    conf = res_conf.scalars().first()
+    nome_empresa = conf.valor if conf else "Cantina Digital"
+
+    html = f"""
+    <html>
+    <head>
+        <title>Pedido {pedido.codigo}</title>
+        <style>
+            body {{ font-family: 'Courier New', monospace; font-size: 12px; width: 300px; margin: 0; padding: 10px; }}
+            .header {{ text-align: center; margin-bottom: 10px; border-bottom: 1px dashed #000; padding-bottom: 5px; }}
+            .item {{ display: flex; justify-content: space-between; margin-bottom: 3px; }}
+            .total {{ border-top: 1px dashed #000; margin-top: 5px; padding-top: 5px; font-weight: bold; text-align: right; }}
+            .footer {{ text-align: center; margin-top: 15px; font-size: 10px; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h3>{nome_empresa}</h3>
+            <p>Senha: <strong>{pedido.codigo}</strong></p>
+            <p>{pedido.created_at.strftime('%d/%m/%Y %H:%M')}</p>
+        </div>
+        
+        <div>
+            <p><strong>Cliente:</strong> {pedido.cliente_nome or 'Não inf.'}</p>
+            <p><strong>Retirada:</strong> {pedido.data_retirada.strftime('%H:%M')}</p>
+            {f'<p><strong>Mesa:</strong> {pedido.mesa}</p>' if pedido.mesa else ''}
+        </div>
+        
+        <hr style="border-top: 1px dashed #000;">
+        
+    """
+    
+    for item in pedido.itens:
+        html += f"""
+        <div class="item">
+            <span>{item.quantidade}x {item.produto_nome}</span>
+            <span>R$ {item.preco_unitario * item.quantidade:.2f}</span>
+        </div>
+        """
+        if item.observacao:
+            html += f"<div style='font-size:10px; margin-bottom:5px;'>OBS: {item.observacao}</div>"
+
+    html += f"""
+        <div class="total">TOTAL: R$ {pedido.total:.2f}</div>
+        <div class="footer">Pagamento: {pedido.forma_pagamento or 'Pendente'}</div>
+        <script>window.print();</script>
+    </body>
+    </html>
+    """
+    return html
+
 @app.post("/pedidos/{pedido_id}/pagar")
-def pagar_pedido(
+async def pagar_pedido(
     pedido_id: int,
     forma_pagamento: FormaPagamento,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
-    pedido = db.query(Pedido).filter(Pedido.id == pedido_id).first()
+    result = await db.execute(select(Pedido).where(Pedido.id == pedido_id))
+    pedido = result.scalars().first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     
@@ -940,24 +1023,28 @@ def pagar_pedido(
     pedido.status = StatusPedido.AGENDADO.value
     pedido.forma_pagamento = forma_pagamento.value
     pedido.pago_at = datetime.utcnow()
-    db.commit()
+    await db.commit()
     
-    log_acao(db, "AGENDAMENTO", None, 
+    await log_acao(db, "AGENDAMENTO", None, 
              f"Pedido {pedido.codigo} agendado e pago via {forma_pagamento.value}")
+
+    # Notificar Admin (WebSocket)
+    await manager.broadcast({"type": "update_pedido", "pedido_id": pedido.id, "status": pedido.status})
     
     return {"msg": "Pagamento confirmado e pedido agendado", "pedido": pedido.codigo}
 
 @app.put("/pedidos/{pedido_id}/status")
-def atualizar_status_pedido(
+async def atualizar_status_pedido(
     pedido_id: int,
     status: StatusPedido,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    pedido = db.query(Pedido).filter(Pedido.id == pedido_id).first()
+    result = await db.execute(select(Pedido).where(Pedido.id == pedido_id))
+    pedido = result.scalars().first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     
@@ -966,91 +1053,105 @@ def atualizar_status_pedido(
     if status == StatusPedido.ENTREGUE:
         pedido.entregue_at = datetime.utcnow()
     
-    db.commit()
+    await db.commit()
     
-    log_acao(db, "ATUALIZAR_STATUS", current_user.id, f"Pedido {pedido.codigo} -> {status.value}")
+    # Notificar Admin (WebSocket)
+    await manager.broadcast({"type": "update_pedido", "pedido_id": pedido.id, "status": status.value})
+    
+    await log_acao(db, "ATUALIZAR_STATUS", current_user.id, f"Pedido {pedido.codigo} -> {status.value}")
     return {"msg": f"Status atualizado para {status.value}"}
 
 @app.delete("/pedidos/{pedido_id}")
-def cancelar_pedido(
+async def cancelar_pedido(
     pedido_id: int,
     motivo: Optional[str] = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    pedido = db.query(Pedido).filter(Pedido.id == pedido_id).first()
+    # Carregar itens para devolver ao estoque
+    result = await db.execute(select(Pedido).options(selectinload(Pedido.itens)).where(Pedido.id == pedido_id))
+    pedido = result.scalars().first()
+
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     
     # Devolver estoque (Atomicamente também)
     for item in pedido.itens:
-        db.query(Produto).filter(Produto.id == item.produto_id).update(
-            {"estoque": Produto.estoque + item.quantidade},
-            synchronize_session=False
+        await db.execute(
+            update(Produto).where(Produto.id == item.produto_id).values(estoque=Produto.estoque + item.quantidade)
         )
     
     pedido.status = StatusPedido.CANCELADO.value
-    db.commit()
+    await db.commit()
     
-    log_acao(db, "CANCELAR_PEDIDO", current_user.id, 
+    # Notificar Admin (WebSocket)
+    await manager.broadcast({"type": "update_pedido", "pedido_id": pedido.id, "status": "cancelado"})
+
+    await log_acao(db, "CANCELAR_PEDIDO", current_user.id, 
              f"Pedido {pedido.codigo} cancelado. Motivo: {motivo}")
     
     return {"msg": "Pedido cancelado com sucesso"}
 
 # Dashboard e Relatórios
 @app.get("/dashboard/stats", response_model=DashboardStats)
-def get_dashboard_stats(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+async def get_dashboard_stats(db: AsyncSession = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
     hoje = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     
     # Vendas agendadas para hoje
-    vendas_hoje = db.query(func.sum(Pedido.total)).filter(
+    res_vendas = await db.execute(select(func.sum(Pedido.total)).where(
         func.date(Pedido.created_at) == hoje.date(),
         Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
-    ).scalar() or 0
+    ))
+    vendas_hoje = res_vendas.scalar() or 0
     
-    pedidos_hoje = db.query(Pedido).filter(
+    res_qtd = await db.execute(select(func.count(Pedido.id)).where(
         func.date(Pedido.created_at) == hoje.date()
-    ).count()
+    ))
+    pedidos_hoje = res_qtd.scalar() or 0
     
     ticket_medio = vendas_hoje / pedidos_hoje if pedidos_hoje > 0 else 0
     
     # Produtos com estoque baixo
-    baixo_estoque = db.query(Produto).filter(
+    res_baixo = await db.execute(select(func.count(Produto.id)).where(
         Produto.ativo == True,
         Produto.estoque <= Produto.estoque_minimo
-    ).count()
+    ))
+    baixo_estoque = res_baixo.scalar() or 0
     
     # Pedidos pendentes
-    pendentes = db.query(Pedido).filter(
+    res_pend = await db.execute(select(func.count(Pedido.id)).where(
         Pedido.status.in_([StatusPedido.AGUARDANDO_PAGAMENTO.value, StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value])
-    ).count()
+    ))
+    pendentes = res_pend.scalar() or 0
     
     # Vendas da semana (últimos 7 dias)
     semana_atras = hoje - timedelta(days=7)
-    vendas_semana = db.query(
+    res_semana = await db.execute(select(
         func.date(Pedido.created_at).label('data'),
         func.sum(Pedido.total).label('total'),
         func.count(Pedido.id).label('quantidade')
-    ).filter(
+    ).where(
         Pedido.created_at >= semana_atras,
         Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
-    ).group_by(func.date(Pedido.created_at)).all()
+    ).group_by(func.date(Pedido.created_at)))
+    vendas_semana = res_semana.all()
     
     # Top 5 Produtos mais vendidos
-    top_produtos = db.query(
+    res_top = await db.execute(select(
         Produto.nome,
         func.sum(ItemPedido.quantidade).label('total_vendido')
     ).join(ItemPedido, Produto.id == ItemPedido.produto_id)\
      .join(Pedido, Pedido.id == ItemPedido.pedido_id)\
-     .filter(
+     .where(
         Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
-    ).group_by(Produto.id, Produto.nome).order_by(func.sum(ItemPedido.quantidade).desc()).limit(5).all()
+    ).group_by(Produto.id, Produto.nome).order_by(func.sum(ItemPedido.quantidade).desc()).limit(5))
+    top_produtos = res_top.all()
     
     return {
         "total_vendas_hoje": round(vendas_hoje, 2),
@@ -1063,24 +1164,25 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: Usuario = D
     }
 
 @app.get("/relatorios/vendas")
-def relatorio_vendas(
+async def relatorio_vendas(
     data_inicio: datetime,
     data_fim: datetime,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    vendas = db.query(
+    res = await db.execute(select(
         func.date(Pedido.created_at).label('data'),
         func.sum(Pedido.total).label('total'),
         func.count(Pedido.id).label('quantidade'),
         Pedido.forma_pagamento
-    ).filter(
+    ).where(
         Pedido.created_at.between(data_inicio, data_fim),
         Pedido.status.in_([StatusPedido.AGENDADO.value, StatusPedido.PREPARANDO.value, StatusPedido.PRONTO.value, StatusPedido.ENTREGUE.value])
-    ).group_by(func.date(Pedido.created_at), Pedido.forma_pagamento).all()
+    ).group_by(func.date(Pedido.created_at), Pedido.forma_pagamento))
+    vendas = res.all()
     
     return {
         "periodo": {"inicio": data_inicio, "fim": data_fim},
@@ -1088,16 +1190,27 @@ def relatorio_vendas(
     }
 
 @app.get("/relatorios/exportar/csv")
-def exportar_pedidos_csv(
-    db: Session = Depends(get_db),
+async def exportar_pedidos_csv(
+    data_inicio: Optional[datetime] = None,
+    data_fim: Optional[datetime] = None,
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Gera um arquivo CSV com todos os pedidos para análise em Excel"""
+    """Gera um arquivo CSV dos pedidos para análise em Excel. Se datas não forem passadas, baixa tudo."""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Acesso negado")
     
-    # Buscar todos os pedidos com seus itens
-    pedidos = db.query(Pedido).order_by(Pedido.created_at.desc()).all()
+    # Montar Query com filtros opcionais
+    query = select(Pedido).options(selectinload(Pedido.itens).selectinload(ItemPedido.produto))
+    
+    if data_inicio:
+        query = query.where(Pedido.created_at >= data_inicio)
+    if data_fim:
+        query = query.where(Pedido.created_at <= data_fim)
+        
+    # Ordenar e Executar
+    res = await db.execute(query.order_by(Pedido.created_at.desc()))
+    pedidos = res.scalars().all()
     
     # Criar arquivo em memória (StringIO)
     output = io.StringIO()

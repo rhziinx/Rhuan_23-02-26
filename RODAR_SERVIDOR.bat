@@ -29,7 +29,8 @@ echo Ativando ambiente virtual...
 call venv\Scripts\activate
 
 echo Verificando e instalando bibliotecas (pode demorar na primeira vez)...
-python -m pip install -r requirements.txt >nul
+REM Instalando bibliotecas modernas para Async e Performance
+python -m pip install fastapi uvicorn sqlalchemy aiosqlite pydantic pydantic-settings python-jose[cryptography] passlib[bcrypt] python-multipart slowapi >nul
 
 echo.
 echo ==========================================
@@ -45,3 +46,4 @@ echo.
 timeout /t 5
 start http://localhost:8000
 python main.py
+pause

@@ -3,3 +3,19 @@
 2026-03-10 20:33:24,907 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
 2026-03-10 20:48:46,484 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
 2026-03-10 20:56:00,042 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 18:11:17,575 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 18:24:39,588 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 18:29:52,253 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 18:42:32,720 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 20:10:12,203 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 20:22:10,974 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 20:32:27,079 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-11 20:55:05,604 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-12 14:22:12,570 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-12 14:32:46,069 - INFO - SQLite WAL Mode ativado (Melhor performance de concorrência)
+2026-03-12 14:33:02,159 - WARNING - Lentidão detectada: POST /auth/login demorou 3.3793s
+2026-03-12 14:33:08,673 - WARNING - Lentidão detectada: GET /config demorou 0.6797s
+2026-03-12 14:33:08,828 - WARNING - Lentidão detectada: GET /dashboard/stats demorou 0.8355s
+2026-03-12 14:33:10,062 - WARNING - Lentidão detectada: GET /dashboard/stats demorou 1.2269s
+2026-03-12 14:33:10,068 - WARNING - Lentidão detectada: GET /pedidos demorou 0.8186s
+2026-03-12 14:33:16,069 - WARNING - Lentidão detectada: GET /pedidos demorou 0.7175s
